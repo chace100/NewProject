@@ -20,7 +20,7 @@
   "properties": {
     "schemaVersion": {
       "const": 1,
-      "description": "关卡格式版本。破坏性变更才递增;引擎按此字段决定加载/迁移策略。"
+      "description": "关卡格式版本。破坏性变更才递增。加载顺序(见 ARCHITECTURE §3.6):先读本字段(此时不校验整份文档)→ 按版本链迁移到当前版本 → 再用本 schema 校验。因此本文件描述的是“当前版本”的格式:v2 出现时本文件改名为 level.v1.schema.json 并新增描述 v2 的 level.schema.json。"
     },
     "id": {
       "type": "string",
@@ -143,15 +143,15 @@
     },
     "physicsOverrides": {
       "type": "object",
-      "description": "对引擎默认物理参数的逐项覆盖(见 ARCHITECTURE §2 参数表)。未给出的字段使用引擎默认值。",
+      "description": "对引擎默认物理参数的逐项覆盖(见 ARCHITECTURE §2.10 参数表)。未给出的字段使用引擎默认值;嵌套对象(如 turnAuthority、jump)同样允许只覆盖其中一个子字段,其余取默认值。",
       "additionalProperties": false,
       "properties": {
         "gravity": {
           "type": "number",
           "exclusiveMinimum": 0,
           "maximum": 50,
-          "default": 20,
-          "description": "竖直重力加速度(m/s^2)。为手感调过的游戏化取值,教学文案不引用其数值。"
+          "default": 9.82,
+          "description": "竖直重力加速度(m/s^2)。默认取教材口径 9.82,使 s = v^2/(2*mu*g) 与学生自己算的结果一致;跳跃的“轻快感”靠 jump.initialVerticalSpeed 与关卡尺度调节,不靠改这个值。"
         },
         "airDrag": {
           "type": "number",
@@ -164,20 +164,27 @@
           "type": "number",
           "exclusiveMinimum": 0,
           "maximum": 60,
-          "default": 14
+          "default": 12,
+          "description": "水平速度上限(m/s)。默认 12,与研究卡的关卡参数一致(关卡 3 需要“速度翻倍”为 6 → 12)。"
         },
         "accel": {
           "type": "number",
           "exclusiveMinimum": 0,
           "maximum": 100,
-          "default": 14,
-          "description": "按住前进键时的地面加速度(m/s^2),与摩擦力共同决定实际净加速度。"
+          "default": 12,
+          "description": "按住前进键时的地面加速度(m/s^2),与摩擦力共同决定净加速度 a = accel - mu*g。"
+        },
+        "restThreshold": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "default": 0.05,
+          "description": "静止判定阈值(m/s)。速度低于该值即视为停住,用于过关判定与自动化测试,避免“永远几乎为零地漂移”。"
         },
         "turnAuthority": {
           "type": "object",
-          "description": "转向权随速度衰减(手感层,不是物理层):authority = max(floor, 1 / (1 + speed / vRef))。速度越大越难急转,用于表现运动状态保持。",
+          "description": "转向权随速度衰减(手感层,不是物理层):authority = max(floor, 1 / (1 + speed / vRef))。速度越大越难急转,用于表现运动状态保持。可只覆盖其中一个子字段。角速度单位为度/秒,由加载器统一换算为弧度(见 ARCHITECTURE §2.2)。",
           "additionalProperties": false,
-          "required": ["vRef", "floor"],
           "properties": {
             "vRef": {
               "type": "number",
@@ -201,14 +208,15 @@
         },
         "jump": {
           "type": "object",
+          "description": "跳跃参数。可只覆盖其中一个子字段,其余取默认值。",
           "additionalProperties": false,
-          "required": ["initialVerticalSpeed"],
           "properties": {
             "initialVerticalSpeed": {
               "type": "number",
               "exclusiveMinimum": 0,
               "maximum": 30,
-              "default": 8
+              "default": 5.5,
+              "description": "起跳竖直初速(m/s)。默认 5.5 配合 g=9.82 得到 1.12 s 滞空、1.54 m 跳高。"
             },
             "coyoteSeconds": {
               "type": "number",
@@ -240,7 +248,7 @@
           "type": "number",
           "minimum": 0,
           "maximum": 3,
-          "description": "动摩擦系数(无量纲)。地面减速度 a = mu * gravity,滑行距离 s = v^2 / (2 * mu * gravity)。"
+          "description": "动摩擦系数(无量纲)。地面减速度 a = mu * gravity,滑行距离 s = v^2 / (2 * mu * gravity)。默认参数下 ice/normal/rubber = 0.05/0.25/0.90,滑行距离互为 1/5/18 倍。"
         },
         "restitution": {
           "type": "number",
@@ -342,6 +350,7 @@
         },
         "walls": {
           "type": "object",
+          "description": "该段左右两侧的横向边界行为。优先级高于全局 failure.outOfBounds:只要角色在墙高以下撞到 solid/bounce 的边界,就按墙处理,不再走兜底策略。",
           "additionalProperties": false,
           "default": {"left": {"type": "bounce"}, "right": {"type": "bounce"}},
           "properties": {
@@ -511,7 +520,7 @@
     },
     "zone": {
       "type": "object",
-      "description": "沿地形段的一个判定区间。区间用段内里程 [from, to] 与横向范围 [lateralMin, lateralMax] 描述,引擎无需网格求交即可判定。",
+      "description": "沿地形段的一个判定区间。区间用段内里程 [from, to] 与横向范围 [lateralMin, lateralMax] 描述,引擎无需网格求交即可判定。注意 JSON Schema 无法表达 from < to、lateralMin < lateralMax 这类跨字段比较,它们由数据自洽性测试负责(见 ARCHITECTURE §6.1 断言 10)。",
       "additionalProperties": false,
       "required": ["segmentId", "from", "to"],
       "properties": {
@@ -524,7 +533,8 @@
         },
         "to": {
           "type": "number",
-          "exclusiveMinimum": 0
+          "exclusiveMinimum": 0,
+          "description": "区间终点(段内里程 m),必须大于 from —— 由测试保证。"
         },
         "lateralMin": {
           "type": "number",
@@ -602,7 +612,7 @@
         "fallBelowY": {
           "type": "number",
           "default": -10,
-          "description": "世界 y 低于该值判定坠落失败(m),保留坠落过程供玩家看到惯性后果。"
+          "description": "世界 y 低于该值判定坠落失败(m),保留坠落过程供玩家看到惯性后果。本条件是独立的终止条件,优先级高于 outOfBounds。"
         },
         "timeoutSeconds": {
           "type": "number",
@@ -611,7 +621,8 @@
         },
         "outOfBounds": {
           "enum": ["block", "fail"],
-          "default": "fail"
+          "default": "fail",
+          "description": "兜底策略,只在角色横向越出地形且未被段的 walls 拦住时生效(例如从墙顶越过)。block=推回边界,不判失败;fail=立即判失败。段的 walls 优先于本字段,见 ARCHITECTURE §2.8 的判定顺序。"
         },
         "hazardContact": {
           "enum": ["fail", "slow"],
