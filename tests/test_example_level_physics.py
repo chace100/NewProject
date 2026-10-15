@@ -144,7 +144,11 @@ class ExampleLevelDataTest(unittest.TestCase):
         high = goal_segment_start + zone["to"]
         self.assertGreaterEqual(result["x"], low)
         self.assertLessEqual(result["x"], high)
-        self.assertAlmostEqual(result["x"], 81.4, delta=0.2)  # 文档 §3.5 写的是 81.4 m
+        # 文档 §3.5 写的是 81.4 m(离散模型值;解析链给 81.3,差一个步长量级)。
+        # 容差取 0.3:实测 1/60 积分值 81.385,距 81.4 仅 0.015 m,但整关结果会随
+        # dt 漂移(1/30 → 81.443,1/240 → 81.346,见 §5.3),0.2 的余量太薄,
+        # 微调 restThreshold 就会假红。
+        self.assertAlmostEqual(result["x"], 81.4, delta=0.3)
 
     def test_actor_actually_reaches_the_ice(self):
         result = self.model.simulate(self.level["spawn"], thrust_segments={"runway"})
