@@ -55,6 +55,10 @@ PINNED_VERSIONS = [
 
 # Acceptance line the card sets for itself (§1.5 and the §3.4 rationale column).
 MIN_CONTRAST = 3.0
+# Gravity the card's harness pins (docs/research/exp.mjs: ``const G = 9.82``).
+# Re-deriving §1.5(d)'s deviation column needs the same constant, and hard-coding
+# it here keeps this test pure Python: the repo's CI has no Node step.
+G_ACCEL = 9.82
 # Measured doubling ratios for d ~ v0^2 (§1.5(d)); analytic value 4.000.
 DOUBLING_BOUNDS = (3.6, 4.4)
 
@@ -262,6 +266,57 @@ class ResearchCardTest(unittest.TestCase):
             "146.540 m",
             _cells(ice[0])[4],
             "the v₀=12 ice column must stay measured, not extrapolated",
+        )
+
+    def test_adapter_deviations_match_the_analytic_law(self):
+        """The §1.5(d) deviation column must be derivable from the same row.
+
+        The measured distances are already pinned by
+        ``test_measured_doubling_ratio_supports_level_three``; this test closes
+        the remaining hole by recomputing ``(d - v0^2/(2*mu*g)) / analytic``
+        from *those same cells* and comparing against the percentages printed
+        in the row. A column copied from the neighbouring row — the defect this
+        guards — reproduces the ratio column but not this one.
+        """
+        rows = _row(self.text, r"\|\s*(?:冰面|橡胶)")
+        self.assertGreaterEqual(len(rows), 2, "§1.5(d) needs both media rows")
+        seen = {}
+        for row in rows:
+            cells = _cells(row)
+            mu_match = re.search(r"μ\s*=\s*([0-9.]+)", cells[0])
+            self.assertIsNotNone(mu_match, f"row states no μ: {cells[0]!r}")
+            mu = float(mu_match.group(1))
+            medium = "冰面" if "冰面" in cells[0] else "橡胶"
+            # U+2212 MINUS SIGN, as the card uses throughout
+            printed = [
+                float(v.replace("−", "-").replace("%", ""))
+                for v in re.findall(r"[−-][0-9]+\.[0-9]+%", cells[6])
+            ]
+            distances = [float(re.search(r"[0-9.]+", c).group()) for c in cells[1:5]]
+            self.assertEqual(
+                len(printed), 4, f"{medium} deviation column is not four values"
+            )
+            for v0, measured, claimed in zip((2, 4, 8, 12), distances, printed):
+                analytic = v0 * v0 / (2 * mu * G_ACCEL)
+                expected = 100.0 * (measured - analytic) / analytic
+                # the card prints distances rounded to millimetres, so a cell
+                # value can sit up to 5e-4 m away from the figure the harness
+                # divided; widen the tolerance by exactly that much
+                delta = 100.0 * 5e-4 / analytic + 0.01
+                self.assertAlmostEqual(
+                    claimed,
+                    expected,
+                    delta=delta,
+                    msg=(
+                        f"{medium} μ={mu} v0={v0}: card prints {claimed}% but "
+                        f"{measured} m against {analytic:.3f} m is {expected:.2f}%"
+                    ),
+                )
+            # and the rows genuinely differ, so one column is not the other's copy
+            seen[medium] = printed
+        self.assertEqual(set(seen), {"冰面", "橡胶"})
+        self.assertNotEqual(
+            seen["冰面"], seen["橡胶"], "the two media rows share a deviation column"
         )
 
     def test_determinism_row_pins_single_argument_step(self):
