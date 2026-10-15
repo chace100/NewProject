@@ -1,0 +1,42 @@
+name: CI
+
+# ---------------------------------------------------------------------------
+# Factory contract — do not remove these two properties of the trigger:
+#
+#   * This workflow is the factory's test evidence. tests-watchdog reads the
+#     Actions runs recorded for a pull request's EXACT head sha and folds them
+#     into the `software-factory/tests` commit status; the delivery watchdog
+#     refuses to merge unless that status is `success` on that head.
+#   * Do NOT add `paths:` / `branches:` filters that can leave a head with no
+#     run at all. A head with no run reads as `pending`, never as `passed`, so
+#     a filtered-out pull request stops the merge gate with no alert. If you
+#     need a conditional check, let the job skip itself instead — GitHub's
+#     `skipped` / `neutral` conclusions count as passing.
+#
+# Details and the install command:
+# factory-new-project/assets/github/workflows/README.md
+# ---------------------------------------------------------------------------
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        run: pip install pytest
+
+      # Replace this with the project's real checks (pytest, ruff, mypy, a
+      # build, an integration smoke test, ...). Whatever you put here must
+      # FAIL when the change is wrong — it is the deterministic half of the
+      # merge gate, and the only part a machine, not a model, judges.
+      - name: Run tests
+        run: python -m pytest tests/ -q
