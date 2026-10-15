@@ -674,7 +674,14 @@ E2E 不测数值精度——精度由 §6.1 的纯函数测试负责。
 
 仓库当前的 CI(`.github/workflows/ci.yml`)只有 `pip install pytest` 一步,因此任何依赖第三方包的断言都会在门禁上被 skip。本单元的处理方式与理由:
 
-1. **不在本分支改 `ci.yml`。** 该文件是随 `main` 一起进入仓库的(commit `21f22c0`),而本分支的基底早于它;在特性分支上新增同一路径会与 `main` 形成 add/add 冲突(GitHub 会把 PR 标成不可合并,反而卡住交付)。已用 `git merge-tree --write-tree main <branch>` 复现:`CONFLICT (add/add): Merge conflict in .github/workflows/ci.yml`。需要补 `jsonschema` 的一行改动应由 `main` 的维护者或 #7(它会把 CI 换成 npm 流水线)来做。
+1. **不在本分支改 `ci.yml`。** 该文件是随 `main` 一起进入仓库的(commit `21f22c0`),而本分支的基底早于它(本分支上根本没有这个路径)。**注意复现方式**:在本分支当前状态下直接跑 `git merge-tree --write-tree main <branch>` 是**不会**报冲突的(本分支没有这个路径,git 直接取 `main` 的版本,实测 exit 0)——冲突只在"本分支真的新增了这个文件、且内容与 `main` 不同"时才出现,也就是 QA 建议的那一行改动本身:
+   ```
+   $ git show main:.github/workflows/ci.yml | sed 's/pip install pytest/pip install pytest jsonschema/' \
+       > .github/workflows/ci.yml && git add -A && git commit -m tmp
+   $ git merge-tree --write-tree --name-only main HEAD
+   CONFLICT (add/add): Merge conflict in .github/workflows/ci.yml
+   ```
+   所以结论不变(这条改动会制造冲突,让 PR 被标成不可合并),但"在本分支上直接复现冲突"的说法是错的,按上面的方式才可复现。需要补 `jsonschema` 的一行改动应由 `main` 的维护者或 #7(它会把 CI 换成 npm 流水线)来做。
 2. **把门禁做成不依赖第三方包的形态。** 新增 `tests/test_level_doc_contract.py`,只 import 标准库:它从 `docs/schema/level.schema.json` 里读出真正要守的约束(必需字段、枚举、数值区间、`$defs` 引用是否可解析、`if/then` 分支要求),再逐条应用到文档里内嵌的示例关卡;此外 `tests/test_example_level_physics.py` 用参考积分器验算示例关卡的物理自洽性。因此**在现有 CI 上真实执行**(模拟 `pip install pytest` 环境实测:`19 passed, 4 skipped`,其中 4 条 skip 的是需要 `jsonschema` 的深度校验层;改动前是 `1 passed, 4 skipped`)。
 3. **深度校验层保留。** `tests/test_level_schema.py` 仍用 `jsonschema` 做完整 draft 2020-12 校验(它能发现标准库检查发现不了的 schema 关键字错误),在装了该包的环境与后续 #7 的流水线里生效。
 
