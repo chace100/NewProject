@@ -222,7 +222,7 @@ const aNet      = aInput - aFriction;              // 净加速度(符号决定�
 2. **滑行距离只由初速与摩擦系数决定。** `s = v² / (2μg)`,同初速下摩擦越小滑得越远。
 3. **空中不减速。** 默认 `airDrag = 0`,腾空时水平速度严格不变,抛物线落点只由水平速度和滞空时间决定。这是刻意的教学取舍:加一点"空气阻力"手感更"游戏",但会破坏"没有外力,运动状态不改变"的演示;该字段保留为可调(供 #10 逐关覆盖),而不是写死。
 
-**离散化的坑(必须处理)**:直接写 `v -= a * dt` 时,当 `v < a*dt` 速度会被减成负数或抖动到零附近,滑行距离因此依赖 `dt`。因此本步位移用**解析求解**,并显式处理三种"本步中途发生状态切换"的情形:`a = 0`(无摩擦段,§6.1 断言 3)、**本步内减速到 0**、以及**本步内加速到限速**:
+**离散化的坑(必须处理)**:直接写 `v -= a * dt` 时,当 `v < a*dt` 速度会被减成负数或抖动到零附近,滑行距离因此依赖 `dt`。因此本步位移用**解析求解**,并显式处理四种"本步中途发生状态切换"的情形:`a = 0`(无摩擦段,§6.1 断言 3)、**本步内减速到 0**、**本步内加速到限速**、以及**进入本步时已在限速之上**:
 
 ```ts
 // src/sim/friction.ts
@@ -236,8 +236,11 @@ export function advanceAlongDirection(
   if (a < 0 && v + a * dt <= 0) {                     // 本步内停住:s = v²/(2|a|),与 dt 无关
     return { dv: -v, ds: (v * v) / (-2 * a) };
   }
-  if (a > 0 && v + a * dt > maxSpeed) {               // 本步内到达限速:tCap 处拆成两段
-    const tCap = (maxSpeed - v) / a;                  // v 已在限速上时 tCap = 0,位移正好 maxSpeed*dt
+  if (a > 0 && v >= maxSpeed) {                       // 已在限速之上:先截断,位移只按限速算
+    return { dv: maxSpeed - v, ds: maxSpeed * dt };   // 不能走下面的 tCap 拆分:tCap = (maxSpeed-v)/a < 0
+  }
+  if (a > 0 && v + a * dt > maxSpeed) {               // 本步内到达限速:tCap 处拆成两段(此处 tCap >= 0)
+    const tCap = (maxSpeed - v) / a;                  // v == maxSpeed 时 tCap = 0,退化成上一分支,位移正好 maxSpeed*dt
     const ds = v * tCap + 0.5 * a * tCap * tCap + maxSpeed * (dt - tCap);
     return { dv: maxSpeed - v, ds };
   }
@@ -255,6 +258,13 @@ v_new*dt - 0.5*a*dt² == 0.5*(v_old + v_new)*dt     只在 v_new = v_old + a*dt 
 ```
 
 饱和步(`v == maxSpeed`、仍在按前进键)是最容易看出问题的一步:位移必须正好是 `maxSpeed * dt`,而"先算出 `v + a*dt`、截断后再减去 `0.5*a*dt²`"会给出 `maxSpeed*dt - 0.5*a*dt²`。本关 `a_net = 12 - 0.25×9.82 = 9.545 m/s²`、`dt = 1/60`,每步短 **0.001326 m**;§3.5 那条路线有 58 个饱和步,累计短 **0.078 m**。所以上面的写法把限速解析地并入同一步:在 `tCap = (maxSpeed - v)/a` 处切开,前段按 `a` 推进、后段按恒速 `maxSpeed` 推进,饱和步因此正好是 `maxSpeed*dt`(§6.1 断言 13)。这与"本步内停住"用的是同一个手法,不是特例补丁。
+
+**`v > maxSpeed` 是合法输入,必须单独拦住。** 上面那条 `tCap` 拆分只在 `v < maxSpeed` 时成立:`v` 一旦已经在限速**之上**,`tCap = (maxSpeed - v)/a` 就是**负数**,两段式退化成 `ds = maxSpeed*dt - (v - maxSpeed)²/(2a)` —— 当 `v - maxSpeed > √(2·a·maxSpeed·dt)`(本关 `a_net = 9.545`、`maxSpeed = 12`、`dt = 1/60` 时为 **1.954 m/s**,即 `v > 13.954`)就变成**负位移**,角色在第一帧被推着**倒退**,随后跑出赛道起点被判 `failed`。这不是假想的输入,有两条合法路径能到达:
+
+1. `spawn.speed` 在 schema 里只有 `minimum: 0`、**没有最大值**(`docs/schema/level.schema.json` 的 `spawn`),关卡作者可以写 `speed: 20`;
+2. `maxSpeed` 是**逐关可覆盖**的(§3.3),把 `physics.maxSpeed` 调到低于 `spawn.speed` 同样越限。
+
+所以函数入口处先判 `v >= maxSpeed` 并直接返回 `{ dv: maxSpeed - v, ds: maxSpeed*dt }`:先截断(这一步不再加速),位移只按限速算,既保住"限速步正好 `maxSpeed*dt`"这条判别式,又保证 `ds >= 0`。这条守卫与 `a < 0` 那条"本步内停住"是同一层意思 —— 三个分支分别对应**三种本步中途发生状态切换**的情形,越限进入属于第四种,原先漏了。
 
 ### 2.5 转向:运动状态保持的第二条可感证据
 
@@ -489,7 +499,7 @@ export const validateLevel = new Ajv({ allErrors: true, strict: true }).compile(
 | 判定段(60–90 m)松手 | 再滑 `104.7/(2×2.455) = 21.3 m` | **停在 81.399 m**,落在 `stopzone` 的 [75, 85] m 判定区内 ✅ |
 | 同样路线但中场换成橡胶地 | 入场 12 m/s,`144/(2×8.838) = 8.2 m` 就停(`2×8.838×40 = 707 >> 144`,根本走不完这 40 m) | **停在 28.203 m**(橡胶地中段就停住,到不了判定区)——同一操作,相差 53 m |
 
-> **读数说明(避免验算对不上账):** "计算"列里的 `104.7`、`2×2.455`、`144/(2×8.838)` 都是**连续模型**的解析中间量(给学生用 `s = v²/(2μg)` 手算用的);而"结果"列**加粗的最终位置**是**离散定步长模型**(§2.3,`FIXED_DT = 1/60`)逐帧积分出来的,两者相差一个步长的量级。所以直接拿"计算"列的解析链算到底会得到 `60 + 21.3 = 81.3`、`20 + 8.1 = 28.1`,比加粗值小 0.1 m 上下 —— 这不是矛盾,是解析解与离散解的差异;`tests/test_example_level_physics.py` 断言的是后者(81.4 / 28.2,容差 0.3),精度与容差见 §6.1。
+> **读数说明(避免验算对不上账):** "计算"列里的 `104.7`、`2×2.455`、`144/(2×8.838)` 都是**连续模型**的解析中间量(给学生用 `s = v²/(2μg)` 手算用的);而"结果"列**加粗的最终位置**是**离散定步长模型**(§2.3,`FIXED_DT = 1/60`)逐帧积分出来的,两者相差一个步长的量级。所以直接拿"计算"列的解析链算到底会得到 `60 + 21.3 = 81.3`、`20 + 8.1 = 28.1`,比加粗值小 0.1 m 上下 —— 这不是矛盾,是解析解与离散解的差异;`tests/test_example_level_physics.py` 断言的是后者(81.4 / 28.2,容差 0.3),精度与容差见 §6.1。**这条容差是被 dt 漂移逼出来的,不是精度余量**:整关终点随步长漂移,1/30…1/480 的梯子全距 **0.2675 m**(§5.3),所以容差必须 ≥0.27 才能覆盖整条梯子,取 0.3。容差 0.2 时 1/30 那端只剩 **0.0007 m** 余量(实测 81.5993,偏离 0.1993)—— 它**恰好仍然通过**,但已经贴着窗口边界,任何合法的小改动都会把它挤出去,所以 0.2 不可用;`tests/.../test_documented_tolerance_cannot_discriminate_the_clamp_placement` 把这个全距断言下来,免得有人只看 1/60 那一点就以为可以收紧。代价是这条容差**区分不了**把限速截断留在调用方的那种 F-01 读法(缺陷读法 81.3849 vs 正确读法 81.3989,只差 0.014 m,两者都在窗口内)。F-01 由 §6.1 断言 13 的 `ds == maxSpeed*dt` 负责,不由这里负责。
 >
 > 表里的离散值随积分器对**限速步**的处理而变(§2.4)。三种读法(实测,`dt = 1/60`):
 >
@@ -699,12 +709,12 @@ test('同初速下冰面滑行距离至少是橡胶地的 3 倍', () => {
 | 10 | 关卡数据通过 schema 校验,且 `goal`/`spawn`/`obstacles` 引用的 `segmentId`、`terrain[].surface` 引用的材质 id 都存在;`zone.from < to`、`lateralMin < lateralMax` 成立 | schema 表达不了的跨字段约束 |
 | 11 | 文档 §3.5 的示例关卡用参考积分器跑一遍:能到达冰面、按文档策略停在判定区内、把中场换成橡胶地则停在区外 | 示例关卡自洽(防止文档与数据漂移) |
 | 12 | 角度换算只发生一次:`load.ts` 之后的 `maxTurnRateRad = 2.094 rad/s`(±1e-6),`sim/` 内不再出现 `π/180` | §2.2 单位铁律 |
-| 13 | **限速步的判别式**:在 `v == maxSpeed` 且仍在加速的一步上 `ds == maxSpeed * dt`(±1e-12),即 §2.4 的解析拆分成立;并断言 0 → `maxSpeed` 的离散里程 ≈ 7.66 m、与解析 `v²/(2a)` 相差不超过 0.2 m | §2.4 限速由积分器负责 |
+| 13 | **限速步的判别式**:在 `v == maxSpeed` 且仍在加速的一步上 `ds == maxSpeed * dt`(±1e-12),即 §2.4 的解析拆分成立;并断言 0 → `maxSpeed` 的离散里程 ≈ 7.66 m、与解析 `v²/(2a)` 相差不超过 0.2 m。**越限侧也要测**:对 `v > maxSpeed`(合法输入,见 §2.4)断言 `ds >= 0`、`dv <= 0` 且 `ds <= maxSpeed*dt` —— 只测 `v == maxSpeed` 恰好落在唯一一个分支行为良好的点上 | §2.4 限速由积分器负责 |
 | 14 | §2.10 表里的默认值与 schema 的 `default` 逐项一致(`gravity`/`airDrag`/`maxSpeed`/`accel`/`restThreshold`/`turnAuthority`/`jump`/`holdSeconds`/`maxStopSpeed`),且参考实现的兜底值等于 schema 默认 | §3.6 "以 schema 为准" |
 
 第 10–14 条是 schema 与单位约定表达不了的部分,用测试补齐,"加关卡不改代码"才真的安全。
 
-本单元已经落地的部分:`tests/test_example_level_physics.py` 实现了断言 1/2/10/11/13 的可执行版本(参考积分器 + 数据自洽性),`tests/test_level_doc_contract.py` 实现了 schema ↔ 文档的一致性门禁(含断言 14 的默认值比对);两者都只用标准库,因此在当前 CI 上真实执行(§6.3)。#8 落地 `src/sim/` 后,把它们替换成 `tests/sim/*.test.ts` 的 Vitest 版本,并保留同一组断言编号。
+本单元已经落地的部分:`tests/test_example_level_physics.py` 实现了断言 1/2/10/11/13 的可执行版本(参考积分器 + 数据自洽性),`tests/test_level_doc_contract.py` 实现了 schema ↔ 文档的一致性门禁(含断言 14 的默认值比对);两者都只用标准库,因此在当前 CI 上真实执行(§6.3)。**注意断言 13 只在解析拆分那个分支上取值是不够的**(见该行):`v == maxSpeed` 恰好落在唯一一个"两个分支给出同一结果且都正确"的点上,越限侧必须单独探 —— 由 `test_over_cap_step_never_moves_backwards`(单步探 `v ∈ {maxSpeed, 13.0, 阈值, 14.1, 20.0, 40.0}`,断言 `ds >= 0`、`dv <= 0`、`ds <= maxSpeed*dt`)与 `test_level_with_spawn_speed_over_the_cap_stays_on_the_track`(整关复现 `spawn.speed = 20 / 40` 与 `maxSpeed = 6` 两条合法越限路径)承担;`test_documented_tolerance_cannot_discriminate_the_clamp_placement` 则把"§3.5 那条 0.3 容差为何挡不住 F-01、以及它为何不能再收紧"一并钉住。#8 落地 `src/sim/` 后,把它们替换成 `tests/sim/*.test.ts` 的 Vitest 版本,并保留同一组断言编号。
 
 ### 6.2 冒烟与交互测试(Playwright)
 
