@@ -1,0 +1,750 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/chace100/NewProject/docs/schema/level.schema.json",
+  "title": "Level",
+  "description": "惯性跑酷教学游戏的关卡数据。关卡文件与引擎代码完全解耦:引擎只认识本 schema,新增关卡只新增 JSON。单位约定:长度=米(m),时间=秒(s),角度=度(deg),速率=米/秒(m/s)。坐标系为右手系,y 轴向上;每个地形段以自己的入口为局部原点,段内前进方向为 +Z,右侧为 +X。",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "id",
+    "order",
+    "title",
+    "knowledgePoint",
+    "spawn",
+    "surfaces",
+    "terrain",
+    "goal",
+    "teaching"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "const": 1,
+      "description": "关卡格式版本。破坏性变更才递增;引擎按此字段决定加载/迁移策略。"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{1,31}$",
+      "description": "关卡唯一标识,同时用作进度存储的键。"
+    },
+    "order": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "关卡顺序,决定解锁顺序与关卡选择界面的排序。"
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 30,
+      "description": "关卡名(中文),展示在 HUD 与关卡选择界面。"
+    },
+    "knowledgePoint": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 60,
+      "description": "本关聚焦的知识点,如“运动状态保持:没有外力就继续滑行”。用于关卡选择界面与图鉴卡片。"
+    },
+    "environment": {
+      "$ref": "#/$defs/environment"
+    },
+    "physics": {
+      "$ref": "#/$defs/physicsOverrides"
+    },
+    "spawn": {
+      "$ref": "#/$defs/spawn"
+    },
+    "surfaces": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "$ref": "#/$defs/surface"
+      },
+      "description": "本关可用的地面材质表,键名即 terrain[].surface 引用的材质 id。引擎内置 ice/normal/rubber 默认值,关卡可覆盖。"
+    },
+    "terrain": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/terrainSegment"
+      },
+      "description": "地形段序列。数组顺序即玩家前进方向上的串联顺序:第 n+1 段的入口接在第 n 段的出口。"
+    },
+    "obstacles": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/obstacle"
+      },
+      "default": []
+    },
+    "goal": {
+      "$ref": "#/$defs/goal"
+    },
+    "failure": {
+      "$ref": "#/$defs/failure"
+    },
+    "teaching": {
+      "$ref": "#/$defs/teaching"
+    },
+    "rewards": {
+      "$ref": "#/$defs/rewards"
+    },
+    "camera": {
+      "$ref": "#/$defs/camera"
+    },
+    "i18n": {
+      "type": "object",
+      "description": "预留:文案多语言覆盖。键为 BCP-47 语言标签,值为 { 文案路径: 文案 } 的映射。MVP 只发中文,保留字段避免后续破坏 schema。",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "skyColor": {
+          "$ref": "#/$defs/color"
+        },
+        "ambientIntensity": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 3,
+          "default": 0.7
+        },
+        "shadowQuality": {
+          "enum": ["high", "medium", "low", "off"],
+          "default": "medium",
+          "description": "阴影档位。低端设备降级时引擎可强制下调,无需改关卡文件。"
+        },
+        "fog": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["color", "near", "far"],
+          "properties": {
+            "color": {
+              "$ref": "#/$defs/color"
+            },
+            "near": {
+              "type": "number",
+              "minimum": 0
+            },
+            "far": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            }
+          }
+        }
+      }
+    },
+    "physicsOverrides": {
+      "type": "object",
+      "description": "对引擎默认物理参数的逐项覆盖(见 ARCHITECTURE §2 参数表)。未给出的字段使用引擎默认值。",
+      "additionalProperties": false,
+      "properties": {
+        "gravity": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 50,
+          "default": 20,
+          "description": "竖直重力加速度(m/s^2)。为手感调过的游戏化取值,教学文案不引用其数值。"
+        },
+        "airDrag": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 0,
+          "description": "空气阻力系数。默认 0:腾空时保持水平速度不变,这正是“运动状态保持”要展示的现象。"
+        },
+        "maxSpeed": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 60,
+          "default": 14
+        },
+        "accel": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 100,
+          "default": 14,
+          "description": "按住前进键时的地面加速度(m/s^2),与摩擦力共同决定实际净加速度。"
+        },
+        "turnAuthority": {
+          "type": "object",
+          "description": "转向权随速度衰减(手感层,不是物理层):authority = max(floor, 1 / (1 + speed / vRef))。速度越大越难急转,用于表现运动状态保持。",
+          "additionalProperties": false,
+          "required": ["vRef", "floor"],
+          "properties": {
+            "vRef": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "default": 8
+            },
+            "floor": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "maximum": 1,
+              "default": 0.3
+            },
+            "maxTurnRate": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "maximum": 720,
+              "default": 120,
+              "description": "满转向权时的最大转向角速度(度/秒)。实际角速度 = maxTurnRate * authority。"
+            }
+          }
+        },
+        "jump": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["initialVerticalSpeed"],
+          "properties": {
+            "initialVerticalSpeed": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "maximum": 30,
+              "default": 8
+            },
+            "coyoteSeconds": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 0.5,
+              "default": 0.1,
+              "description": "离地后仍可起跳的宽限时间,手感用。"
+            }
+          }
+        },
+        "defaultSurface": {
+          "type": "string",
+          "default": "normal",
+          "description": "surfaces 中作为兜底的材质 id。"
+        }
+      }
+    },
+    "color": {
+      "type": "string",
+      "pattern": "^#[0-9a-fA-F]{6}$"
+    },
+    "surface": {
+      "type": "object",
+      "description": "一种地面材质的物理与视觉定义。",
+      "additionalProperties": false,
+      "required": ["mu", "color"],
+      "properties": {
+        "mu": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 3,
+          "description": "动摩擦系数(无量纲)。地面减速度 a = mu * gravity,滑行距离 s = v^2 / (2 * mu * gravity)。"
+        },
+        "restitution": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 0,
+          "description": "撞墙/落地的法向恢复系数,仅影响手感演出。"
+        },
+        "color": {
+          "$ref": "#/$defs/color",
+          "description": "该材质在地面上的基础色,用于让“看不见的摩擦”可感知。"
+        },
+        "pattern": {
+          "enum": ["plain", "ice", "rubber", "grid"],
+          "default": "plain",
+          "description": "程序化纹理样式,渲染层据此生成贴图,避免外部资源依赖。"
+        },
+        "label": {
+          "type": "string",
+          "maxLength": 12,
+          "description": "HUD 上显示的中文材质名,如“冰面”“橡胶地”。"
+        }
+      }
+    },
+    "spawn": {
+      "type": "object",
+      "description": "起点定义。",
+      "additionalProperties": false,
+      "required": ["segmentId"],
+      "properties": {
+        "segmentId": {
+          "type": "string"
+        },
+        "at": {
+          "type": "number",
+          "minimum": 0,
+          "default": 1,
+          "description": "距该地形段入口的距离(m)。"
+        },
+        "lateral": {
+          "type": "number",
+          "default": 0,
+          "description": "横向偏移(m),正值靠右。"
+        },
+        "heading": {
+          "type": "number",
+          "description": "初始朝向(度,相对该段前进方向)。缺省时朝向该段前进方向。"
+        },
+        "speed": {
+          "type": "number",
+          "minimum": 0,
+          "default": 0,
+          "description": "初始水平速度(m/s)。第 1 关用 0;需要“带着速度进场”的关卡可给正值。"
+        }
+      }
+    },
+    "terrainSegment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "length", "width", "surface"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_-]{1,32}$"
+        },
+        "type": {
+          "enum": ["straight", "arc", "ramp"],
+          "description": "straight=直道;arc=等曲率弯道(用 curvature);ramp=上下坡(用 grade)。"
+        },
+        "length": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 500,
+          "description": "段长(m),沿段中心线测量。"
+        },
+        "width": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 100,
+          "description": "路面宽度(m)。横向超出即撞墙或掉落,由 walls 决定。"
+        },
+        "surface": {
+          "type": "string",
+          "description": "材质 id,必须存在于本关 surfaces(或引擎内置默认材质)。"
+        },
+        "curvature": {
+          "type": "number",
+          "minimum": -30,
+          "maximum": 30,
+          "default": 0,
+          "description": "仅 type=arc 有效:每前进 1m 的转角度数(deg/m),正值向右弯。"
+        },
+        "grade": {
+          "type": "number",
+          "minimum": -60,
+          "maximum": 60,
+          "default": 0,
+          "description": "仅 type=ramp 有效:坡度百分比,正值上坡。用于把重力分量引入摩擦对比。"
+        },
+        "walls": {
+          "type": "object",
+          "additionalProperties": false,
+          "default": {"left": {"type": "bounce"}, "right": {"type": "bounce"}},
+          "properties": {
+            "left": {
+              "$ref": "#/$defs/wall"
+            },
+            "right": {
+              "$ref": "#/$defs/wall"
+            }
+          }
+        },
+        "scenery": {
+          "type": "array",
+          "description": "纯装饰物(不参与碰撞),如路标、树木;用于方向感与速度感。",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "at"],
+            "properties": {
+              "kind": {
+                "enum": ["cone", "flag", "tree", "arch", "sign"]
+              },
+              "at": {
+                "type": "number",
+                "minimum": 0
+              },
+              "lateral": {
+                "type": "number",
+                "default": 0
+              },
+              "spacing": {
+                "type": "number",
+                "exclusiveMinimum": 0,
+                "description": "可选:沿段内每隔 spacing 米重复放置(如路旁锥桶)。"
+              }
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"type": {"const": "arc"}},
+            "required": ["type"]
+          },
+          "then": {
+            "required": ["curvature"],
+            "properties": {
+              "curvature": {"type": "number"}
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {"type": {"const": "ramp"}},
+            "required": ["type"]
+          },
+          "then": {
+            "required": ["grade"],
+            "properties": {
+              "grade": {"type": "number"}
+            }
+          }
+        }
+      ]
+    },
+    "wall": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "enum": ["none", "solid", "bounce"],
+          "default": "bounce",
+          "description": "none=可直接滑出路外(触发坠落失败);solid=撞停;bounce=按 surfaces.restitution 反弹。"
+        },
+        "height": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 1.5,
+          "description": "墙高(m);高于墙高则视为越过墙顶。"
+        }
+      }
+    },
+    "obstacle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "shape", "segmentId", "at"],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "shape": {
+          "enum": ["box", "cylinder"]
+        },
+        "segmentId": {
+          "type": "string"
+        },
+        "at": {
+          "type": "number",
+          "minimum": 0,
+          "description": "沿该段中心线距入口的距离(m)。"
+        },
+        "lateral": {
+          "type": "number",
+          "default": 0
+        },
+        "size": {
+          "type": "object",
+          "description": "shape=box 时的半宽半高半深(m)。",
+          "additionalProperties": false,
+          "required": ["x", "y", "z"],
+          "properties": {
+            "x": {"type": "number", "exclusiveMinimum": 0},
+            "y": {"type": "number", "exclusiveMinimum": 0},
+            "z": {"type": "number", "exclusiveMinimum": 0}
+          }
+        },
+        "radius": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "shape=cylinder 时使用。"
+        },
+        "height": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "shape=cylinder 时使用。"
+        },
+        "behavior": {
+          "enum": ["solid", "hazard"],
+          "default": "solid",
+          "description": "solid=可撞;hazard=接触即失败(教学上表现“撞上就没速度了”的后果)。"
+        },
+        "restitution": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 0.1
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"shape": {"const": "box"}},
+            "required": ["shape"]
+          },
+          "then": {
+            "required": ["size"],
+            "properties": {
+              "size": {"type": "object"}
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {"shape": {"const": "cylinder"}},
+            "required": ["shape"]
+          },
+          "then": {
+            "required": ["radius", "height"],
+            "properties": {
+              "radius": {"type": "number"},
+              "height": {"type": "number"}
+            }
+          }
+        }
+      ]
+    },
+    "zone": {
+      "type": "object",
+      "description": "沿地形段的一个判定区间。区间用段内里程 [from, to] 与横向范围 [lateralMin, lateralMax] 描述,引擎无需网格求交即可判定。",
+      "additionalProperties": false,
+      "required": ["segmentId", "from", "to"],
+      "properties": {
+        "segmentId": {
+          "type": "string"
+        },
+        "from": {
+          "type": "number",
+          "minimum": 0
+        },
+        "to": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "lateralMin": {
+          "type": "number",
+          "description": "横向区间下界(m)。缺省时取该段全宽。"
+        },
+        "lateralMax": {
+          "type": "number",
+          "description": "横向区间上界(m)。缺省时取该段全宽。"
+        }
+      }
+    },
+    "goal": {
+      "description": "过关判定条件。四种模式覆盖 5 关的知识点排布。",
+      "oneOf": [
+        {
+          "title": "reachGoal",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "zone"],
+          "properties": {
+            "type": {"const": "reachGoal"},
+            "zone": {"$ref": "#/$defs/zone"},
+            "minSpeed": {"type": "number", "minimum": 0},
+            "maxSpeed": {"type": "number", "minimum": 0},
+            "description": {"type": "string", "maxLength": 120}
+          }
+        },
+        {
+          "title": "stopInZone",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "zone"],
+          "properties": {
+            "type": {"const": "stopInZone"},
+            "zone": {"$ref": "#/$defs/zone"},
+            "holdSeconds": {"type": "number", "minimum": 0, "default": 0.5},
+            "maxStopSpeed": {"type": "number", "minimum": 0, "default": 0.3},
+            "description": {"type": "string", "maxLength": 120}
+          }
+        },
+        {
+          "title": "passGates",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "gates"],
+          "properties": {
+            "type": {"const": "passGates"},
+            "gates": {
+              "type": "array",
+              "minItems": 1,
+              "items": {"$ref": "#/$defs/zone"},
+              "description": "必须按数组顺序依次通过,乱序通过不计数。"
+            },
+            "description": {"type": "string", "maxLength": 120}
+          }
+        },
+        {
+          "title": "maintainSpeed",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "zone", "minSpeed"],
+          "properties": {
+            "type": {"const": "maintainSpeed"},
+            "zone": {"$ref": "#/$defs/zone"},
+            "minSpeed": {"type": "number", "exclusiveMinimum": 0},
+            "description": {"type": "string", "maxLength": 120}
+          }
+        }
+      ]
+    },
+    "failure": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "fallBelowY": {
+          "type": "number",
+          "default": -10,
+          "description": "世界 y 低于该值判定坠落失败(m),保留坠落过程供玩家看到惯性后果。"
+        },
+        "timeoutSeconds": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "可选超时。缺省不限时(教学游戏不鼓励比手速)。"
+        },
+        "outOfBounds": {
+          "enum": ["block", "fail"],
+          "default": "fail"
+        },
+        "hazardContact": {
+          "enum": ["fail", "slow"],
+          "default": "fail"
+        }
+      }
+    },
+    "teaching": {
+      "type": "object",
+      "description": "教学提示文案挂载点。所有面向学生的文案都从这里读取,不写死在代码里。",
+      "additionalProperties": false,
+      "required": ["intro", "onClear", "onFail"],
+      "properties": {
+        "intro": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "description": "开局提示:点明本关要预判什么。"
+        },
+        "hint": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["afterSeconds", "text"],
+          "properties": {
+            "afterSeconds": {"type": "number", "exclusiveMinimum": 0, "default": 12},
+            "text": {"type": "string", "minLength": 1, "maxLength": 160}
+          },
+          "description": "可选:卡关一段时间后出现的提示。"
+        },
+        "onClear": {
+          "$ref": "#/$defs/lessonText"
+        },
+        "onFail": {
+          "$ref": "#/$defs/lessonText"
+        },
+        "prediction": {
+          "type": "object",
+          "description": "可选:先预测再验证交互(至少一关使用)。选项与正解都在数据里。",
+          "additionalProperties": false,
+          "required": ["prompt", "options", "correctOptionId"],
+          "properties": {
+            "prompt": {"type": "string", "minLength": 1, "maxLength": 160},
+            "options": {
+              "type": "array",
+              "minItems": 2,
+              "maxItems": 4,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["id", "label"],
+                "properties": {
+                  "id": {"type": "string"},
+                  "label": {"type": "string", "maxLength": 60}
+                }
+              }
+            },
+            "correctOptionId": {"type": "string"},
+            "onCorrect": {"type": "string", "maxLength": 160},
+            "onWrong": {"type": "string", "maxLength": 160}
+          }
+        }
+      }
+    },
+    "lessonText": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["principle", "tip"],
+      "properties": {
+        "principle": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60,
+          "description": "一句话点破物理原理,如“没有外力,运动状态不会自己改变”。"
+        },
+        "tip": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160,
+          "description": "面向 12-15 岁的口语化建议。"
+        }
+      }
+    },
+    "rewards": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "parTimeSeconds": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "starThresholds": {
+          "type": "array",
+          "description": "用时的三档阈值(秒),升序:<=t1 三星、<=t2 两星、<=t3 一星。",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          }
+        }
+      }
+    },
+    "camera": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "enum": ["follow", "fixed"],
+          "default": "follow"
+        },
+        "distance": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 7
+        },
+        "height": {
+          "type": "number",
+          "default": 2.4
+        },
+        "pitch": {
+          "type": "number",
+          "minimum": -60,
+          "maximum": 10,
+          "default": -12,
+          "description": "俯仰角(度),负值俯视。"
+        },
+        "fov": {
+          "type": "number",
+          "minimum": 30,
+          "maximum": 110,
+          "default": 60
+        }
+      }
+    }
+  }
+}
