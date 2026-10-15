@@ -732,9 +732,9 @@ E2E 不测数值精度——精度由 §6.1 的纯函数测试负责。
 
 `python -m pytest tests/ -q`(本仓库当前的测试入口)→ 后续 #7 接管为 `npm run build`(含 `tsc --noEmit`)→ `npm run test` → `npm run test:e2e`。另外三条轻量但重要的检查:
 
-- **依赖边界测试**:扫描 `src/sim/**` 与 `src/levels/types.ts` 的 import,出现 `three`、DOM、`render/`、`ui/` 即失败。
+- **依赖边界测试**:覆盖 §2.1 与 §4.3 的全部硬性规则,而不只是 import 语句——(a) 扫描 `src/sim/**` 与 `src/levels/types.ts` 的 import,出现 `three`、DOM、`render/`、`ui/` 即失败;(b) 扫描同一批文件里出现 `requestAnimationFrame`、`Math.random()`、`Date.now()`、`performance.now()` 即失败(§2.1 的帧循环禁令与 §2.11 的确定性要求:这四个都是**全局**,import 扫描看不见,必须单独查标识符);(c) 反向断言 `src/render/**` 不 import `src/sim/step.ts`(§4.3 的后半条,规则是对称的,只扫 `sim/` 会漏掉它)。
 - **体积预算检查**:构建产物 gzip 后超过 §5.1 上限即失败。
-- **关卡数据自洽性**:§6.1 断言 10/11 的自动化版本,新增关卡不通过就不许合并。
+- **关卡数据自洽性**:§6.1 断言 10/11 的自动化版本,新增关卡不通过就不许合并。其中跨字段部分(§6.1 断言 10 的 `zone.from < to`、`lateralMin < lateralMax`)与断言 11 的示例关卡验算已经由 `tests/test_level_doc_contract.py`、`tests/test_example_level_physics.py` **在当前 CI 上真实执行**(标准库,无需 `jsonschema`);#7 把它扩到 `tests/levels/` 下的全部关卡。
 
 ## 7. 与后续任务(#7–#10)的对应关系
 

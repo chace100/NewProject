@@ -159,6 +159,34 @@ class LevelFormatContractTest(unittest.TestCase):
         self.assertLess(zone["from"], zone["to"])
         self.assertLessEqual(zone["to"], lengths[zone["segmentId"]])
 
+    def test_cross_field_comparisons_hold(self):
+        """§6.1 断言 10 的跨字段部分:JSON Schema 2020-12 表达不了的大小关系。
+
+        §4.1 的注释把断言 10/11 的自动化版本记在 `tests/levels/`(#7 起),但这三条
+        是标准库就能查的,而且漂移代价高:`lateralMin >= lateralMax` 或
+        `zone.from >= zone.to` 的判定区是空集 —— schema 全部通过,关卡却永远
+        不可能过关。缺省 lateral 表示"取该段全宽"(schema 的 zone.lateralMin/
+        lateralMax 描述),那时无需比较。
+        """
+        for name, zone in self.zones():
+            self.assertIn(zone["segmentId"], {s["id"] for s in self.example["terrain"]}, name)
+            self.assertLess(zone["from"], zone["to"], name)
+            if "lateralMin" in zone and "lateralMax" in zone:
+                self.assertLess(zone["lateralMin"], zone["lateralMax"], name)
+
+    def zones(self):
+        """示例关卡里所有"段内里程 + 横向区间"的判定区间,带可读名字。
+
+        ``stopInZone``/``reachGoal``/``maintainSpeed`` 用 ``zone``,``passGates`` 用
+        ``gates``(数组,元素是同一个 ``$defs/zone``)—— 后者的顺序也有意义
+        (schema:"必须按数组顺序依次通过"),所以逐项查而不是只查第一个。
+        """
+        goal = self.example["goal"]
+        if "zone" in goal:
+            yield "goal.zone", goal["zone"]
+        for index, gate in enumerate(goal.get("gates", [])):
+            yield f"goal.gates[{index}]", gate
+
     # --- defaults: schema ``default`` is the single source of truth (§3.6) -------
 
     def test_documented_defaults_match_schema(self):
