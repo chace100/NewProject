@@ -179,7 +179,7 @@
           "exclusiveMinimum": 0,
           "maximum": 1,
           "default": 0.05,
-          "description": "静止判定阈值(m/s)。速度低于该值即视为停住,用于过关判定与自动化测试,避免“永远几乎为零地漂移”。"
+          "description": "物理层静止阈值(m/s)。积分器在速度降到该值以下时归零并退出滑行,避免“永远几乎为零地漂移”。它决定运动何时停止,与判定层的 goal.stopInZone.maxStopSpeed(默认 0.3,决定停稳是否被认可)是两个不同的量,不要合并或互相覆盖(见 ARCHITECTURE §2.10)。"
         },
         "turnAuthority": {
           "type": "object",
@@ -571,7 +571,12 @@
             "type": {"const": "stopInZone"},
             "zone": {"$ref": "#/$defs/zone"},
             "holdSeconds": {"type": "number", "minimum": 0, "default": 0.5},
-            "maxStopSpeed": {"type": "number", "minimum": 0, "default": 0.3},
+            "maxStopSpeed": {
+              "type": "number",
+              "minimum": 0,
+              "default": 0.3,
+              "description": "判定层过关阈值(m/s):在 zone 内持续 holdSeconds 且速度始终不超过该值,才算停稳过关。它与物理层的 physics.restThreshold(默认 0.05)职责不同,默认也刻意更宽松——玩家在判定区内仍按着前进键时速度会被重新推起,阈值太紧会把“已进区、手上还有点速度”误判为失败(见 ARCHITECTURE §2.10)。"
+            },
             "description": {"type": "string", "maxLength": 120}
           }
         },

@@ -54,6 +54,28 @@ class ReferenceModel:
                 return segment
         return None
 
+    def advance(self, v, a, dt=FIXED_DT):
+        """§2.4 的 ``advanceAlongDirection(v, a, dt, maxSpeed)``,返回 ``(dv, ds)``。
+
+        速度上限(§2.10 的 ``maxSpeed``)由**本函数**负责,调用方不再截断 ——
+        若把 ``min(vmax, v + a*dt)`` 留在调用方、这里却仍返回未截断的 ``dv`` 与
+        ``vmax*dt - 0.5*a*dt²``,饱和步就会短掉 ``0.5*a*dt²``,而那个式子是梯形
+        恒等式,只在末速度未被截断时才成立。
+        """
+        if a == 0:
+            return 0.0, v * dt                       # 无摩擦:匀速直线(也避免 0/0)
+        if a < 0 and v + a * dt <= 0:
+            return -v, (v * v) / (-2 * a)            # 本步内停住:s = v²/(2|a|)
+        v_unclamped = v + a * dt
+        if a > 0 and v_unclamped > self.max_speed:
+            # 本步内到达限速:在 t_cap = (vmax - v)/a 处拆成两段解析推进,
+            # 与"停住步"同一个手法。饱和步(v == vmax)因此正好推进 vmax*dt。
+            t_cap = (self.max_speed - v) / a
+            ds = v * t_cap + 0.5 * a * t_cap * t_cap
+            ds += self.max_speed * (dt - t_cap)
+            return self.max_speed - v, ds
+        return v_unclamped - v, v_unclamped * dt - 0.5 * a * dt * dt
+
     def simulate(self, spawn, thrust_segments, max_seconds=120.0):
         """thrust_segments: 在这些段 id 上按住前进键,其余段松开。"""
         x = self.starts[spawn["segmentId"]] + spawn.get("at", 0.0)
@@ -66,12 +88,9 @@ class ReferenceModel:
             mu = self.surfaces[segment["surface"]]["mu"]
             thrust = self.accel if segment["id"] in thrust_segments else 0.0
             a = thrust - mu * self.gravity
-            if a < 0 and v + a * FIXED_DT <= 0:            # 本步内停住,距离为 v²/(2|a|)
-                x += (v * v) / (-2 * a)
-                v = 0.0
-            else:
-                v = min(self.max_speed, v + a * FIXED_DT)
-                x += v * FIXED_DT - 0.5 * a * FIXED_DT * FIXED_DT
+            dv, ds = self.advance(v, a)
+            v += dv
+            x += ds
             elapsed += FIXED_DT
             if v <= self.rest_threshold and segment["id"] not in thrust_segments:
                 return {"status": "stopped", "x": x, "v": v, "time": elapsed}
@@ -83,12 +102,9 @@ class ReferenceModel:
         x = 0.0
         v = v0
         while v > self.rest_threshold:
-            if v + a * dt <= 0:
-                x += (v * v) / (-2 * a)
-                v = 0.0
-            else:
-                v += a * dt
-                x += v * dt - 0.5 * a * dt * dt
+            dv, ds = self.advance(v, a, dt)
+            v += dv
+            x += ds
         return x
 
 
@@ -145,8 +161,8 @@ class ExampleLevelDataTest(unittest.TestCase):
         self.assertGreaterEqual(result["x"], low)
         self.assertLessEqual(result["x"], high)
         # 文档 §3.5 写的是 81.4 m(离散模型值;解析链给 81.3,差一个步长量级)。
-        # 容差取 0.3:实测 1/60 积分值 81.385,距 81.4 仅 0.015 m,但整关结果会随
-        # dt 漂移(1/30 → 81.443,1/240 → 81.346,见 §5.3),0.2 的余量太薄,
+        # 容差取 0.3:实测 1/60 积分值 81.399,距 81.4 仅 0.001 m,但整关结果会随
+        # dt 漂移(1/30 → 81.599,1/240 → 81.349,见 §5.3),0.2 的余量太薄,
         # 微调 restThreshold 就会假红。
         self.assertAlmostEqual(result["x"], 81.4, delta=0.3)
 
@@ -166,7 +182,7 @@ class ExampleLevelDataTest(unittest.TestCase):
         zone_start = model.starts[swapped["goal"]["zone"]["segmentId"]]
         low = zone_start + swapped["goal"]["zone"]["from"]
         self.assertLess(result["x"], low)
-        self.assertAlmostEqual(result["x"], 28.3, delta=0.3)  # 文档 §3.5 写的是 28.3 m
+        self.assertAlmostEqual(result["x"], 28.2, delta=0.3)  # 文档 §3.5 写的是 28.2 m
 
     def test_ice_rubber_slide_ratio_is_at_least_three(self):
         mu_ice = self.level["surfaces"]["ice"]["mu"]
@@ -182,6 +198,33 @@ class ExampleLevelDataTest(unittest.TestCase):
         distances = [self.model.coast_distance(mu_ice, v0=10.0, dt=1 / hz) for hz in (30, 60, 120, 240)]
         for distance in distances:
             self.assertAlmostEqual(distance, distances[0], places=6)
+
+    def test_saturated_step_advances_exactly_max_speed_times_dt(self):
+        """达到限速后仍在加速的步,位移必须正好是 vmax*dt。
+
+        这是 F-01 的判别式:把 ``min(vmax, v + a*dt)`` 留在调用方、位移仍写
+        ``vmax*dt - 0.5*a*dt²`` 时,每一步都短掉 ``0.5*a*dt²``(本关 1/60 下
+        0.001326 m,58 个饱和步累计 0.078 m),而那个式子是梯形恒等式,
+        只在末速度未被截断时成立。解析拆分给出正好 vmax*dt。
+        """
+        a = self.model.accel - self.level["surfaces"]["normal"]["mu"] * self.model.gravity
+        self.assertGreater(a, 0)
+        dv, ds = self.model.advance(self.model.max_speed, a)
+        self.assertEqual(dv, 0.0)                              # 已在限速上,不能再加速
+        self.assertAlmostEqual(ds, self.model.max_speed * FIXED_DT, places=12)
+
+    def test_ramp_to_max_speed_matches_the_documented_distance(self):
+        """§2.10 / §3.5:0 → maxSpeed 在普通地面上需要 7.66 m(离散)。"""
+        a = self.model.accel - self.level["surfaces"]["normal"]["mu"] * self.model.gravity
+        x, v = 0.0, 0.0
+        while v < self.model.max_speed:
+            dv, ds = self.model.advance(v, a)
+            self.assertGreater(dv, 0.0)                        # 必须会走到限速,不是死循环
+            v += dv
+            x += ds
+        self.assertAlmostEqual(x, 7.66, delta=0.02)
+        # 解析值 v²/(2a) = 144/(2×9.545) = 7.543 m,与离散值差一个步长的量级。
+        self.assertAlmostEqual(x, 144 / (2 * a), delta=0.2)
 
 
 if __name__ == "__main__":

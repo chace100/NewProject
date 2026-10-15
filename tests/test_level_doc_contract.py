@@ -13,6 +13,7 @@ requirements) and applies them to the example level embedded in
 silently. The full validator still runs wherever ``jsonschema`` is available.
 """
 
+import importlib.util
 import json
 import re
 import unittest
@@ -22,6 +23,20 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SCHEMA_PATH = REPO_ROOT / "docs" / "schema" / "level.schema.json"
 ARCH_DOC_PATH = REPO_ROOT / "docs" / "ARCHITECTURE.md"
 JSON_FENCE = re.compile(r"```json\n(.*?)\n```", re.DOTALL)
+
+# §2.10 is the parameter table in ARCHITECTURE.md; the reference integrator in the
+# sibling test file carries the same numbers as fallbacks. Both must agree with the
+# schema ``default``, which §3.6 designates as the single source of truth.
+SECTION_2_10 = re.compile(r"### 2\.10 .*?\n(.*?)\n\n", re.DOTALL)
+
+
+def load_sibling_test_module():
+    """Import ``test_example_level_physics`` by path (no package, no sys.path games)."""
+    path = REPO_ROOT / "tests" / "test_example_level_physics.py"
+    spec = importlib.util.spec_from_file_location("_reference_integrator", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def iter_refs(node):
@@ -143,6 +158,111 @@ class LevelFormatContractTest(unittest.TestCase):
         self.assertIn(zone["segmentId"], lengths)
         self.assertLess(zone["from"], zone["to"])
         self.assertLessEqual(zone["to"], lengths[zone["segmentId"]])
+
+    # --- defaults: schema ``default`` is the single source of truth (§3.6) -------
+
+    def test_documented_defaults_match_schema(self):
+        """§2.10 表 / 参考实现的兜底值 / schema 的 ``default`` 三者必须一致。
+
+        §3.6 把 schema 的 ``default`` 定为唯一真源,但默认值在仓库里有三份拷贝
+        (schema、§2.10 表、``ReferenceModel`` 的 ``.get(...)`` 兜底)。没有这条
+        断言时,三份拷贝可以各自漂移,而"加关卡不改代码"恰恰依赖它们相等 ——
+        尤其 ``restThreshold``(物理层)与 ``maxStopSpeed``(判定层)是两个
+        职责不同的量(§2.10),漂移后会把"没停住"当成"停稳了"。
+        """
+        physics = self.defs["physicsOverrides"]["properties"]
+        self.assertEqual(physics["restThreshold"]["default"], 0.05)
+        self.assertEqual(physics["maxSpeed"]["default"], 12)
+        self.assertEqual(physics["accel"]["default"], 12)
+        self.assertEqual(physics["gravity"]["default"], 9.82)
+        self.assertEqual(physics["airDrag"]["default"], 0)
+        self.assertEqual(physics["defaultSurface"]["default"], "normal")
+
+        turn = physics["turnAuthority"]["properties"]
+        self.assertEqual(turn["vRef"]["default"], 8)
+        self.assertEqual(turn["floor"]["default"], 0.3)
+        self.assertEqual(turn["maxTurnRate"]["default"], 120)
+
+        jump = physics["jump"]["properties"]
+        self.assertEqual(jump["initialVerticalSpeed"]["default"], 5.5)
+        self.assertEqual(jump["coyoteSeconds"]["default"], 0.1)
+
+    def test_goal_mode_thresholds_have_schema_defaults(self):
+        """``stopInZone`` 的 ``holdSeconds`` / ``maxStopSpeed`` 必须有 schema 默认值。
+
+        判定层的阈值不像物理参数那样集中在 ``$defs.physicsOverrides`` 里,而是
+        挂在各 ``goal`` 分支上,所以单独查一遍:漏掉 ``default`` 时 §2.10 的那两行
+        就没有真源可比对。
+        """
+        branches = {b["properties"]["type"]["const"]: b for b in self.defs["goal"]["oneOf"]}
+        stop = branches["stopInZone"]["properties"]
+        self.assertEqual(stop["holdSeconds"]["default"], 0.5)
+        self.assertEqual(stop["maxStopSpeed"]["default"], 0.3)
+        # 判定层阈值必须比物理层静止阈宽松(§2.10 的论证),否则玩家还按着前进键时
+        # 会被判失败。
+        self.assertGreater(stop["maxStopSpeed"]["default"],
+                           self.defs["physicsOverrides"]["properties"]["restThreshold"]["default"])
+
+    def test_reference_integrator_fallbacks_equal_schema_defaults(self):
+        """参考积分器的兜底值必须等于 schema 的 ``default``(§6.1 断言 14)。
+
+        积分器用 ``physics.get(name, fallback)`` 读关卡;兜底只在示例关卡没写该字段
+        时生效,而示例只写了 ``gravity``/``accel``/``maxSpeed``(其余为空档)。这里直
+        接把兜底值和 schema 比一遍,而不是信任两处字面量恰好相同。
+        """
+        reference = load_sibling_test_module()
+        physics = self.defs["physicsOverrides"]["properties"]
+        # 空档(没有 physics 块)⇒ 每个属性都取兜底字面量。
+        bare = reference.ReferenceModel({"terrain": [], "surfaces": {}})
+        for schema_name, attribute in (
+            ("gravity", "gravity"),
+            ("accel", "accel"),
+            ("maxSpeed", "max_speed"),
+            ("restThreshold", "rest_threshold"),
+        ):
+            self.assertEqual(getattr(bare, attribute), physics[schema_name]["default"], schema_name)
+
+    def test_documented_table_quotes_the_schema_defaults(self):
+        """§2.10 表格里逐字写出的默认值必须与 schema 一致。
+
+        文档表格是玩家和关卡作者实际会读的那份;只断言代码里的兜底值不够,表格
+        自己也会漂移(它已经漂过一次:``maxStopSpeed`` 一度只存在于 schema 里)。
+        """
+        text = ARCH_DOC_PATH.read_text(encoding="utf-8")
+        table = SECTION_2_10.search(text)
+        self.assertIsNotNone(table, "ARCHITECTURE.md should keep a §2.10 parameter table")
+        rows = table.group(1)
+        physics = self.defs["physicsOverrides"]["properties"]
+
+        def row_for(name):
+            matches = [line for line in rows.splitlines()
+                       if re.match(rf"\|\s*`?{re.escape(name)}`?\s*\|", line)]
+            self.assertEqual(len(matches), 1, f"expected exactly one §2.10 row for {name}")
+            return matches[0]
+
+        self.assertIn("9.82", row_for("gravity"))
+        self.assertIn("12 m/s", row_for("maxSpeed"))
+        self.assertIn("12 m/s²", row_for("accel"))
+        self.assertIn("0.05 m/s", row_for("restThreshold"))
+        self.assertIn("0.3 m/s", row_for("stopInZone.maxStopSpeed"))
+        self.assertIn("1/60 s", row_for("FIXED_DT"))
+        self.assertEqual(physics["restThreshold"]["default"], 0.05)
+
+    def test_rest_threshold_is_not_the_goal_stop_threshold(self):
+        """两个阈值必须同时出现在 §2.10 表里,且不相等(§2.10 的区分段)。
+
+        F-02 的形态是"schema 有一个 0.3、文档只讲 0.05":表格吞掉其中一个后,读者
+        会以为物理层和判定层共用 0.05。这里断言两行都在,且文档确实做了区分。
+        """
+        text = ARCH_DOC_PATH.read_text(encoding="utf-8")
+        rows = SECTION_2_10.search(text).group(1)
+        self.assertIn("`restThreshold`", rows)
+        self.assertIn("`stopInZone.maxStopSpeed`", rows)
+        stop = {b["properties"]["type"]["const"]: b for b in self.defs["goal"]["oneOf"]}["stopInZone"]
+        self.assertNotEqual(
+            self.defs["physicsOverrides"]["properties"]["restThreshold"]["default"],
+            stop["properties"]["maxStopSpeed"]["default"],
+        )
 
 
 if __name__ == "__main__":
