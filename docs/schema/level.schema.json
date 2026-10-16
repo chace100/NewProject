@@ -230,7 +230,7 @@
         "defaultSurface": {
           "type": "string",
           "default": "normal",
-          "description": "surfaces 中作为兜底的材质 id。"
+          "description": "兜底材质 id:某段未写 surface 时用它。取值规则与 terrain[].surface 相同 —— 必须能解析到本关 surfaces 的键或引擎内置材质(ice/normal/rubber)。此处**不能**写成内置三值的 enum:关卡可定义自定义材质并把它设为兜底,enum 会连带否掉这种合法关卡。这条跨字段约束由测试承担(§6.1 断言 10)。"
         }
       }
     },

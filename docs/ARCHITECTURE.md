@@ -232,15 +232,15 @@ export function advanceAlongDirection(
   dt: number,
   maxSpeed = Infinity,                                // §2.10 的 maxSpeed;关卡可逐项覆盖(§3.3)
 ): { dv: number; ds: number } {
+  if (v > maxSpeed) {                                 // 越限输入:见下方说明,必须最先拦,且与 a 无关
+    return { dv: maxSpeed - v, ds: maxSpeed * dt };
+  }
   if (a === 0) return { dv: 0, ds: v * dt };          // 无摩擦:匀速直线运动(牛顿第一定律的直接体现)
   if (a < 0 && v + a * dt <= 0) {                     // 本步内停住:s = v²/(2|a|),与 dt 无关
     return { dv: -v, ds: (v * v) / (-2 * a) };
   }
-  if (a > 0 && v >= maxSpeed) {                       // 已在限速之上:先截断,位移只按限速算
-    return { dv: maxSpeed - v, ds: maxSpeed * dt };   // 不能走下面的 tCap 拆分:tCap = (maxSpeed-v)/a < 0
-  }
   if (a > 0 && v + a * dt > maxSpeed) {               // 本步内到达限速:tCap 处拆成两段(此处 tCap >= 0)
-    const tCap = (maxSpeed - v) / a;                  // v == maxSpeed 时 tCap = 0,退化成上一分支,位移正好 maxSpeed*dt
+    const tCap = (maxSpeed - v) / a;                  // v == maxSpeed 时 tCap = 0,退化成"位移正好 maxSpeed*dt"
     const ds = v * tCap + 0.5 * a * tCap * tCap + maxSpeed * (dt - tCap);
     return { dv: maxSpeed - v, ds };
   }
@@ -259,12 +259,14 @@ v_new*dt - 0.5*a*dt² == 0.5*(v_old + v_new)*dt     只在 v_new = v_old + a*dt 
 
 饱和步(`v == maxSpeed`、仍在按前进键)是最容易看出问题的一步:位移必须正好是 `maxSpeed * dt`,而"先算出 `v + a*dt`、截断后再减去 `0.5*a*dt²`"会给出 `maxSpeed*dt - 0.5*a*dt²`。本关 `a_net = 12 - 0.25×9.82 = 9.545 m/s²`、`dt = 1/60`,每步短 **0.001326 m**;§3.5 那条路线有 58 个饱和步,累计短 **0.078 m**。所以上面的写法把限速解析地并入同一步:在 `tCap = (maxSpeed - v)/a` 处切开,前段按 `a` 推进、后段按恒速 `maxSpeed` 推进,饱和步因此正好是 `maxSpeed*dt`(§6.1 断言 13)。这与"本步内停住"用的是同一个手法,不是特例补丁。
 
-**`v > maxSpeed` 是合法输入,必须单独拦住。** 上面那条 `tCap` 拆分只在 `v < maxSpeed` 时成立:`v` 一旦已经在限速**之上**,`tCap = (maxSpeed - v)/a` 就是**负数**,两段式退化成 `ds = maxSpeed*dt - (v - maxSpeed)²/(2a)` —— 当 `v - maxSpeed > √(2·a·maxSpeed·dt)`(本关 `a_net = 9.545`、`maxSpeed = 12`、`dt = 1/60` 时为 **1.954 m/s**,即 `v > 13.954`)就变成**负位移**,角色在第一帧被推着**倒退**,随后跑出赛道起点被判 `failed`。这不是假想的输入,有两条合法路径能到达:
+**`v > maxSpeed` 是合法输入,必须最先拦住,而且判据只含 `v`。** 上面那条 `tCap` 拆分只在 `v < maxSpeed` 时成立:`v` 一旦已经在限速**之上**,`tCap = (maxSpeed - v)/a` 就是**负数**,两段式退化成 `ds = maxSpeed*dt - (v - maxSpeed)²/(2a)` —— 当 `v - maxSpeed > √(2·a·maxSpeed·dt)`(本关 `a_net = 9.545`、`maxSpeed = 12`、`dt = 1/60` 时为 **1.954 m/s**,即 `v > 13.954`)就变成**负位移**,角色在第一帧被推着**倒退**,随后跑出赛道起点被判 `failed`。这不是假想的输入,有两条合法路径能到达:
 
 1. `spawn.speed` 在 schema 里只有 `minimum: 0`、**没有最大值**(`docs/schema/level.schema.json` 的 `spawn`),关卡作者可以写 `speed: 20`;
 2. `maxSpeed` 是**逐关可覆盖**的(§3.3),把 `physics.maxSpeed` 调到低于 `spawn.speed` 同样越限。
 
-所以函数入口处先判 `v >= maxSpeed` 并直接返回 `{ dv: maxSpeed - v, ds: maxSpeed*dt }`:先截断(这一步不再加速),位移只按限速算,既保住"限速步正好 `maxSpeed*dt`"这条判别式,又保证 `ds >= 0`。这条守卫与 `a < 0` 那条"本步内停住"是同一层意思 —— 三个分支分别对应**三种本步中途发生状态切换**的情形,越限进入属于第四种,原先漏了。
+所以越限拦截放在函数**最前面**,判据是 `v > maxSpeed` —— **不含 `a`**。这一点是这条守卫的全部要害:写成 `a > 0 && v >= maxSpeed` 时,越限状态只要落在 `a = 0` 或 `a < 0` 的段上就**绕过守卫直接落到末尾的通用返回**,`ds` 变成 `v*dt` 而非 `maxSpeed*dt`。`a = 0` 不是假想值 —— schema 允许 `mu: 0`(只设了 `minimum`),无摩擦面上 `a = thrust - 0 = 0`;任何松开前进键的滑行段则是 `a = -μg < 0`。两种情况下限速都**完全失效**:`a = 0`、`v = 40` 时单帧推进 **0.6667 m**,是 `maxSpeed*dt` 的 **3.33 倍**。限速是硬上限,不是"只在加速时才生效的软约束",所以判据必须独立于 `a`。
+
+拦截本身是一步拉回:`dv = maxSpeed - v`(这一步不再加速)、`ds = maxSpeed*dt`(位移只按限速算)。它同时**取代**了原先那条 `a > 0 && v >= maxSpeed` 分支 —— `v > maxSpeed` 覆盖了旧分支的全部输入,且 `v == maxSpeed` 不需要它:那时 `tCap = (maxSpeed - v)/a = 0`,下面的拆分式自然退化成 `ds = maxSpeed*dt`(`a > 0` 时),位移同样是正好一个限速步。这条守卫与 `a < 0` 那条"本步内停住"是同一层意思 —— 三个分支分别对应**三种本步中途发生状态切换**的情形,越限进入属于第四种,原先漏了。
 
 ### 2.5 转向:运动状态保持的第二条可感证据
 
@@ -333,7 +335,7 @@ s_冰 / s_普通 = μ_普通 / μ_冰 = 0.25 / 0.05 = 5 ×
 
 减速度:冰面 `a = 0.491 m/s²`、普通 `2.455 m/s²`、橡胶 `8.838 m/s²`。关卡设计直接读这两张表下料:例如"冰面段 40 m + 出场后再给 30 m 普通地"就是 §3.5 的示例关卡(§6.1 断言 11 用参考积分器逐帧验证它可通)。
 
-### 2.10 默认参数表(`src/app/config.ts` 的唯一真源,与研究卡 §3.4 对齐)
+### 2.10 默认参数表(`docs/schema/level.schema.json` 的 `default` 为唯一真源,`src/app/config.ts` 为镜像,与研究卡 §3.4 对齐)
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
@@ -540,7 +542,7 @@ NewProject/
 │  ├─ app/
 │  │  ├─ Game.ts               # 顶层编排:加载关卡 → 建场景 → 循环 → 关卡状态机
 │  │  ├─ loop.ts               # 固定步长 accumulator(§2.3)
-│  │  └─ config.ts             # §2.10 默认参数唯一真源
+│  │  └─ config.ts             # §2.10 默认参数的镜像(schema 的 default 才是真源)
 │  ├─ sim/                     # ★ 纯逻辑:不 import three / 不碰 DOM
 │  │  ├─ state.ts              # SimState 定义与从 spawn 初始化
 │  │  ├─ step.ts               # stepSim(state, input, level, dt) → { state, events }
@@ -709,12 +711,12 @@ test('同初速下冰面滑行距离至少是橡胶地的 3 倍', () => {
 | 10 | 关卡数据通过 schema 校验,且 `goal`/`spawn`/`obstacles` 引用的 `segmentId`、`terrain[].surface` 引用的材质 id 都存在;`zone.from < to`、`lateralMin < lateralMax` 成立 | schema 表达不了的跨字段约束 |
 | 11 | 文档 §3.5 的示例关卡用参考积分器跑一遍:能到达冰面、按文档策略停在判定区内、把中场换成橡胶地则停在区外 | 示例关卡自洽(防止文档与数据漂移) |
 | 12 | 角度换算只发生一次:`load.ts` 之后的 `maxTurnRateRad = 2.094 rad/s`(±1e-6),`sim/` 内不再出现 `π/180` | §2.2 单位铁律 |
-| 13 | **限速步的判别式**:在 `v == maxSpeed` 且仍在加速的一步上 `ds == maxSpeed * dt`(±1e-12),即 §2.4 的解析拆分成立;并断言 0 → `maxSpeed` 的离散里程 ≈ 7.66 m、与解析 `v²/(2a)` 相差不超过 0.2 m。**越限侧也要测**:对 `v > maxSpeed`(合法输入,见 §2.4)断言 `ds >= 0`、`dv <= 0` 且 `ds <= maxSpeed*dt` —— 只测 `v == maxSpeed` 恰好落在唯一一个分支行为良好的点上 | §2.4 限速由积分器负责 |
+| 13 | **限速步的判别式**:在 `v == maxSpeed` 且仍在加速的一步上 `ds == maxSpeed * dt`(±1e-12),即 §2.4 的解析拆分成立;并断言 0 → `maxSpeed` 的离散里程 ≈ 7.66 m、与解析 `v²/(2a)` 相差不超过 0.2 m。**越限侧也要测**:对 `v > maxSpeed`(合法输入,见 §2.4)断言 `ds >= 0`、`dv <= 0` 且 `ds <= maxSpeed*dt`,且**对 `a > 0`、`a == 0`、`a < 0` 三种符号各测一遍** —— 越限拦截若带 `a > 0` 合取词,`a <= 0` 的越限步就完全不受限速约束,而只测 `a > 0` 会让这个缺陷全绿通过 | §2.4 限速由积分器负责 |
 | 14 | §2.10 表里的默认值与 schema 的 `default` 逐项一致(`gravity`/`airDrag`/`maxSpeed`/`accel`/`restThreshold`/`turnAuthority`/`jump`/`holdSeconds`/`maxStopSpeed`),且参考实现的兜底值等于 schema 默认 | §3.6 "以 schema 为准" |
 
 第 10–14 条是 schema 与单位约定表达不了的部分,用测试补齐,"加关卡不改代码"才真的安全。
 
-本单元已经落地的部分:`tests/test_example_level_physics.py` 实现了断言 1/2/10/11/13 的可执行版本(参考积分器 + 数据自洽性),`tests/test_level_doc_contract.py` 实现了 schema ↔ 文档的一致性门禁(含断言 14 的默认值比对);两者都只用标准库,因此在当前 CI 上真实执行(§6.3)。**注意断言 13 只在解析拆分那个分支上取值是不够的**(见该行):`v == maxSpeed` 恰好落在唯一一个"两个分支给出同一结果且都正确"的点上,越限侧必须单独探 —— 由 `test_over_cap_step_never_moves_backwards`(单步探 `v ∈ {maxSpeed, 13.0, 阈值, 14.1, 20.0, 40.0}`,断言 `ds >= 0`、`dv <= 0`、`ds <= maxSpeed*dt`)与 `test_level_with_spawn_speed_over_the_cap_stays_on_the_track`(整关复现 `spawn.speed = 20 / 40` 与 `maxSpeed = 6` 两条合法越限路径)承担;`test_documented_tolerance_cannot_discriminate_the_clamp_placement` 则把"§3.5 那条 0.3 容差为何挡不住 F-01、以及它为何不能再收紧"一并钉住。#8 落地 `src/sim/` 后,把它们替换成 `tests/sim/*.test.ts` 的 Vitest 版本,并保留同一组断言编号。
+本单元已经落地的部分:`tests/test_example_level_physics.py` 实现了断言 1/2/10/11/13 的可执行版本(参考积分器 + 数据自洽性),`tests/test_level_doc_contract.py` 实现了 schema ↔ 文档的一致性门禁(含断言 14 的默认值比对);两者都只用标准库,因此在当前 CI 上真实执行(§6.3,实测条数见该节)。**注意断言 13 只在解析拆分那个分支上取值是不够的**(见该行):`v == maxSpeed` 恰好落在唯一一个"两个分支给出同一结果且都正确"的点上,越限侧必须单独探,而且要按 `a` 的符号分别探 —— 由 `test_over_cap_step_never_moves_backwards`(单步探 `a ∈ {9.545, 0, −2.455}` × `v ∈ {maxSpeed, 13.0, 阈值, 14.1, 20.0, 40.0}`,断言 `ds >= 0`、`dv <= 0`、`ds <= maxSpeed*dt`)、`test_zero_friction_surface_cannot_uncap_an_over_speed_spawn`(`mu = 0` 的 schema 边界 → `a == 0` 越限步)与 `test_level_with_spawn_speed_over_the_cap_stays_on_the_track`(整关复现 `spawn.speed = 20 / 40` 与 `maxSpeed = 6` 两条合法越限路径,并对首帧断言 `ds <= maxSpeed*dt`)承担;`test_documented_tolerance_cannot_discriminate_the_clamp_placement` 则把"§3.5 那条 0.3 容差为何挡不住 F-01、以及它为何不能再收紧"一并钉住。**注意收敛终点本身没有判别力** —— `spawn.speed = 20` 与 `40` 收敛到同一个 `x`,任何"越限帧多跑几米、之后照样收在同一处"的实现都满足它,所以首帧位移上界才是那个判别式。#8 落地 `src/sim/` 后,把它们替换成 `tests/sim/*.test.ts` 的 Vitest 版本,并保留同一组断言编号。
 
 ### 6.2 冒烟与交互测试(Playwright)
 
@@ -737,14 +739,16 @@ E2E 不测数值精度——精度由 §6.1 的纯函数测试负责。
    CONFLICT (add/add): Merge conflict in .github/workflows/ci.yml
    ```
    所以结论不变(这条改动会制造冲突,让 PR 被标成不可合并),但"在本分支上直接复现冲突"的说法是错的,按上面的方式才可复现。需要补 `jsonschema` 的一行改动应由 `main` 的维护者或 #7(它会把 CI 换成 npm 流水线)来做。
-2. **把门禁做成不依赖第三方包的形态。** 新增 `tests/test_level_doc_contract.py`,只 import 标准库:它从 `docs/schema/level.schema.json` 里读出真正要守的约束(必需字段、枚举、数值区间、`$defs` 引用是否可解析、`if/then` 分支要求),再逐条应用到文档里内嵌的示例关卡;此外 `tests/test_example_level_physics.py` 用参考积分器验算示例关卡的物理自洽性。因此**在现有 CI 上真实执行**(模拟 `pip install pytest` 环境实测:`19 passed, 4 skipped`,其中 4 条 skip 的是需要 `jsonschema` 的深度校验层;改动前是 `1 passed, 4 skipped`)。
+2. **把门禁做成不依赖第三方包的形态。** 新增 `tests/test_level_doc_contract.py`,只 import 标准库:它从 `docs/schema/level.schema.json` 里读出真正要守的约束(必需字段、枚举、数值区间、`$defs` 引用是否可解析、`if/then` 分支要求),再逐条应用到文档里内嵌的示例关卡;此外 `tests/test_example_level_physics.py` 用参考积分器验算示例关卡的物理自洽性。因此**在现有 CI 上真实执行**(屏蔽 `jsonschema` 后实测:`34 passed, 4 skipped`,共 38 条收集;其中 4 条 skip 的是需要 `jsonschema` 的深度校验层)。这条计数是**可复算**的:屏蔽 `jsonschema` 后跑一遍 `pytest tests/`,数字必须与本句一致 —— 它是"门禁真的在跑"这句话唯一的证据,所以每次增删测试都要同步更新。
 3. **深度校验层保留。** `tests/test_level_schema.py` 仍用 `jsonschema` 做完整 draft 2020-12 校验(它能发现标准库检查发现不了的 schema 关键字错误),在装了该包的环境与后续 #7 的流水线里生效。
 
 `python -m pytest tests/ -q`(本仓库当前的测试入口)→ 后续 #7 接管为 `npm run build`(含 `tsc --noEmit`)→ `npm run test` → `npm run test:e2e`。另外三条轻量但重要的检查:
 
-- **依赖边界测试**:覆盖 §2.1 与 §4.3 的全部硬性规则,而不只是 import 语句——(a) 扫描 `src/sim/**` 与 `src/levels/types.ts` 的 import,出现 `three`、DOM、`render/`、`ui/` 即失败;(b) 扫描同一批文件里出现 `requestAnimationFrame`、`Math.random()`、`Date.now()`、`performance.now()` 即失败(§2.1 的帧循环禁令与 §2.11 的确定性要求:这四个都是**全局**,import 扫描看不见,必须单独查标识符);(c) 反向断言 `src/render/**` 不 import `src/sim/step.ts`(§4.3 的后半条,规则是对称的,只扫 `sim/` 会漏掉它)。
+- **依赖边界测试**(**当前 head 尚未落地 `src/`,本条描述的是 #8 之后的目标状态**,此刻没有任何东西在强制它):覆盖 §2.1 与 §4.3 的全部硬性规则,而不只是 import 语句——(a) 扫描 `src/sim/**` 与 `src/levels/types.ts` 的 import,出现 `three`、DOM、`render/`、`ui/` 即失败;(b) 扫描同一批文件里出现 `requestAnimationFrame`、`Math.random()`、`Date.now()`、`performance.now()` 即失败(§2.1 的帧循环禁令与 §2.11 的确定性要求:这四个都是**全局**,import 扫描看不见,必须单独查标识符);(c) 反向断言 `src/render/**` 不 import `src/sim/step.ts`(§4.3 的后半条,规则是对称的,只扫 `sim/` 会漏掉它)。#8 落地 `src/` 之前,`src/sim/` 的 import 边界只由本文档的规范约束力保证,不由 CI 保证。
 - **体积预算检查**:构建产物 gzip 后超过 §5.1 上限即失败。
-- **关卡数据自洽性**:§6.1 断言 10/11 的自动化版本,新增关卡不通过就不许合并。其中跨字段部分(§6.1 断言 10 的 `zone.from < to`、`lateralMin < lateralMax`)与断言 11 的示例关卡验算已经由 `tests/test_level_doc_contract.py`、`tests/test_example_level_physics.py` **在当前 CI 上真实执行**(标准库,无需 `jsonschema`);#7 把它扩到 `tests/levels/` 下的全部关卡。
+- **关卡数据自洽性**:§6.1 断言 10/11 的自动化版本,新增关卡不通过就不许合并。其中 `zone.from < to` 与断言 11 的示例关卡验算已经由 `tests/test_level_doc_contract.py`、`tests/test_example_level_physics.py` **在当前 CI 上真实执行**(标准库,无需 `jsonschema`)。**覆盖缺口要说清楚**:文档内嵌的那一个示例关卡没有样本——它的 `goal.zone` 只有 `from`/`segmentId`/`to`,没有 `lateralMin`/`lateralMax`,没有 `obstacles` 数组,三个段全是 `straight`(无 `arc`/`ramp`),也没有 `physics.defaultSurface`。因此 `lateralMin < lateralMax`、`obstacles 引用完整性`、`defaultSurface 解析` 与 `arc/ramp 分支必填字段` 这四条**在真实关卡上尚未执行**。这四条现在由合成样本(`SYNTHETIC_LATERAL_ZONE` / `SYNTHETIC_OBSTACLES` / `SYNTHETIC_LEVEL_WITH_CUSTOM_DEFAULT_SURFACE` / `synthetic_terrain_branches`)把逻辑本身跑通,`EMPTY_SAMPLE_GAPS` 登记缺口、`test_documented_coverage_gaps_are_declared` 断言本节如实写着这句话 —— 缺口既不静默通过,也不被说成已覆盖。#7 把它扩到 `tests/levels/` 下的全部关卡时,这四个缺口会由真实关卡覆盖,届时删掉 `EMPTY_SAMPLE_GAPS` 并更新本节。
+
+注意 `defaultSurface` 这一条**不能用 schema 的 `enum` 来关**:`surfaces` 的 `additionalProperties` 是自由的 `$defs/surface`,关卡可以定义自定义材质并把它设为兜底,把内置三值写成 `enum` 会否掉这种合法关卡。所以 schema 只描述规则(可解析到本关 `surfaces` 键或内置 `ice`/`normal`/`rubber`),可解析性由测试承担 —— 这也是它被登记为"示例关卡上尚未执行"的原因。
 
 ## 7. 与后续任务(#7–#10)的对应关系
 

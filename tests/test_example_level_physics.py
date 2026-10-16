@@ -62,44 +62,84 @@ class ReferenceModel:
         ``vmax*dt - 0.5*a*dt²``,饱和步就会短掉 ``0.5*a*dt²``,而那个式子是梯形
         恒等式,只在末速度未被截断时才成立。
         """
+        if v > self.max_speed:
+            # 越限输入(``spawn.speed`` 无上界,``maxSpeed`` 又是关卡可覆盖的)必须
+            # 在这里、且在 ``a == 0`` 与"本步内停住"**之前**拦住:那两个分支只看
+            # ``v + a * dt``,会把越限状态当成普通一步放过去,``ds`` 于是冲破
+            # ``maxSpeed*dt``(a == 0、v == 40 时是 0.6667,3.33 倍)。原先的守卫写作
+            # ``a > 0 and v >= max_speed``,于是越限状态只要落在无摩擦(a == 0)或
+            # 滑行(a == -μg < 0)的段上就完全不受限速约束。限速是硬上限,一步回到
+            # ``maxSpeed``:本步位移按 ``maxSpeed*dt`` 算,之后 ``v <= maxSpeed``,
+            # 分派即恢复正常(滑行段照常减速,不会被永久钉在限速上)。
+            return self.max_speed - v, self.max_speed * dt
         if a == 0:
             return 0.0, v * dt                       # 无摩擦:匀速直线(也避免 0/0)
         if a < 0 and v + a * dt <= 0:
             return -v, (v * v) / (-2 * a)            # 本步内停住:s = v²/(2|a|)
         v_unclamped = v + a * dt
-        if a > 0 and v >= self.max_speed:
-            # 已在限速之上:先截断,位移只按限速算。不能落到下面的 t_cap 拆分 ——
-            # v > max_speed 时 t_cap = (maxSpeed - v)/a < 0,两段式退化成
-            # ds = maxSpeed*dt - (v-maxSpeed)²/(2a),越过 √(2·a·maxSpeed·dt) 就变负。
-            return self.max_speed - v, self.max_speed * dt
         if a > 0 and v_unclamped > self.max_speed:
             # 本步内到达限速:在 t_cap = (vmax - v)/a 处拆成两段解析推进,
             # 与"停住步"同一个手法。饱和步(v == vmax)因此正好推进 vmax*dt。
+            # 上面的越限拦截保证这里 ``v <= vmax``,所以 ``t_cap >= 0`` —— 两段式
+            # 不会退化成 ``maxSpeed*dt - (v-maxSpeed)²/(2a)``(它在 v 越过
+            # √(2·a·maxSpeed·dt) 时变负)。这条退化现在是结构上不可能的,不再需要
+            # 单独一条 ``v >= max_speed`` 守卫。
             t_cap = (self.max_speed - v) / a
             ds = v * t_cap + 0.5 * a * t_cap * t_cap
             ds += self.max_speed * (dt - t_cap)
             return self.max_speed - v, ds
         return v_unclamped - v, v_unclamped * dt - 0.5 * a * dt * dt
 
-    def simulate(self, spawn, thrust_segments, max_seconds=120.0):
-        """thrust_segments: 在这些段 id 上按住前进键,其余段松开。"""
+    def simulate(self, spawn, thrust_segments, max_seconds=120.0, dt=FIXED_DT,
+                 clamp_in_caller=False, stop_x_only=False):
+        """示例关卡的唯一主循环;所有变体(调用方截断、变 dt、只要终点 x)都走它。
+
+        ``thrust_segments``: 在这些段 id 上按住前进键,其余段松开。
+
+        本函数是**同一条轨迹循环的唯一副本**。此前 ``stop_x_with_caller_clamp`` 与
+        ``stop_x_at_timestep`` 各自逐字复制了一份(段查找、``mu`` 查找、推力选择、
+        停止判据),三份必须同步;而它们断言的那些数(81.3849 / 81.3989 / dt 梯子)
+        只有在三份对"停止判据"和"材质查找"的理解一致时才有意义 —— 改一份而漏掉
+        另一份,容差分析会静默失效。现在三者是同一个循环的三个参数:
+
+        - ``clamp_in_caller=True``:复刻 F-01 的缺陷读法(先 ``min(maxSpeed, v+a*dt)``
+          截断、再用截断后的 ``v`` 算 ``v*dt - 0.5*a*dt²``),用来证明 §3.5 那条
+          0.3 容差**区分不了**两种读法。
+        - ``dt=1/hz``:给容差分析用的 dt 梯子。
+        - ``stop_x_only=True``:只返回 ``x``(梯子与缺陷读法都只要终点)。
+        """
         x = self.starts[spawn["segmentId"]] + spawn.get("at", 0.0)
         v = spawn.get("speed", 0.0)
         elapsed = 0.0
+        status = "timeout"
         while elapsed < max_seconds:
             segment = self.segment_at(x)
             if segment is None:
-                return {"status": "left-track", "x": x, "v": v, "time": elapsed}
+                status = "left-track"
+                break
             mu = self.surfaces[segment["surface"]]["mu"]
             thrust = self.accel if segment["id"] in thrust_segments else 0.0
             a = thrust - mu * self.gravity
-            dv, ds = self.advance(v, a)
-            v += dv
-            x += ds
-            elapsed += FIXED_DT
+            if clamp_in_caller:
+                # 缺陷读法:截断在**调用方**,位移仍按未截断的梯形公式算。饱和步
+                # 因此每步短掉 ``0.5*a*dt²``(0.001326 m / 58 步 = 0.078 m)。
+                if a < 0 and v + a * dt <= 0:
+                    x += (v * v) / (-2 * a)
+                    v = 0.0
+                else:
+                    v = min(self.max_speed, v + a * dt)
+                    x += v * dt - 0.5 * a * dt * dt
+            else:
+                dv, ds = self.advance(v, a, dt)
+                v += dv
+                x += ds
+            elapsed += dt
             if v <= self.rest_threshold and segment["id"] not in thrust_segments:
-                return {"status": "stopped", "x": x, "v": v, "time": elapsed}
-        return {"status": "timeout", "x": x, "v": v, "time": elapsed}
+                status = "stopped"
+                break
+        if stop_x_only:
+            return x
+        return {"status": status, "x": x, "v": v, "time": elapsed}
 
     def coast_distance(self, mu, v0, dt=FIXED_DT):
         """同初速、无输入的滑行距离,按同一离散模型逐帧推进。"""
@@ -241,35 +281,14 @@ class ExampleLevelDataTest(unittest.TestCase):
         前者靠两种读法都落在窗口内,后者靠 dt 梯子的全距 —— 谁把容差改成 0.2 或
         更小,`span > 0.2` 这条会先红,而不是等到某个 1/30 的机器上偶发假红。
         """
-        def stop_x_with_caller_clamp(level):
-            """F-01 的缺陷读法,逐字复刻 5806db7 的 ``simulate`` 主循环。
-
-            关键在顺序:先 ``v = min(maxSpeed, v + a*dt)`` **截断**,再用**已截断的**
-            ``v`` 去算 ``v*dt - 0.5*a*dt²``。那个式子是梯形恒等式,只在末速度未被
-            截断时才等于真实位移,所以每个饱和步都短掉 ``0.5*a*dt²``。
-            """
-            model = ReferenceModel(level)
-            x = model.starts[level["spawn"]["segmentId"]] + level["spawn"].get("at", 0.0)
-            v = level["spawn"].get("speed", 0.0)
-            elapsed = 0.0
-            while elapsed < 120.0:
-                segment = model.segment_at(x)
-                mu = model.surfaces[segment["surface"]]["mu"]
-                thrust = model.accel if segment["id"] == "runway" else 0.0
-                a = thrust - mu * model.gravity
-                if a < 0 and v + a * FIXED_DT <= 0:            # 本步内停住,解析
-                    x += (v * v) / (-2 * a)
-                    v = 0.0
-                else:
-                    v = min(model.max_speed, v + a * FIXED_DT)  # 截断在调用方 —— 缺陷所在
-                    x += v * FIXED_DT - 0.5 * a * FIXED_DT * FIXED_DT
-                elapsed += FIXED_DT
-                if v <= model.rest_threshold and segment["id"] != "runway":
-                    break
-            return x
-
+        # F-01 的缺陷读法:先 `v = min(maxSpeed, v + a*dt)` **截断**,再用**已截断的**
+        # `v` 去算 `v*dt - 0.5*a*dt²`。那个式子是梯形恒等式,只在末速度未被截断时才
+        # 等于真实位移,所以每个饱和步都短掉 `0.5*a*dt²`。这曾经是 `simulate` 主循环
+        # 的第二份逐字副本(finding 7),现在只是同一个循环的一个参数 —— 否则两份对
+        # "停止判据/材质查找"的理解一旦分叉,下面这几个数就悄悄失去意义。
         fixed = self.model.simulate(self.level["spawn"], thrust_segments={"runway"})["x"]
-        defective = stop_x_with_caller_clamp(self.level)
+        defective = self.model.simulate(self.level["spawn"], thrust_segments={"runway"},
+                                        clamp_in_caller=True, stop_x_only=True)
 
         window = (81.4 - 0.3, 81.4 + 0.3)
         self.assertAlmostEqual(defective, 81.3849, delta=1e-4)       # 缺陷读法
@@ -283,7 +302,9 @@ class ExampleLevelDataTest(unittest.TestCase):
         # 容差 0.2 时 1/30 那端只剩 0.0007 m 余量(实测 81.5993,偏离 0.1993),
         # 也就是"刚好还在窗口里"——任何合法的小改动都会把它挤出去。容差必须
         # 覆盖整条梯子,这就是 0.3 的来源,而不是精度需要。
-        ladder = {hz: self.stop_x_at_timestep(1 / hz) for hz in (30, 60, 120, 240, 480)}
+        ladder = {hz: self.model.simulate(self.level["spawn"], thrust_segments={"runway"},
+                                          dt=1 / hz, stop_x_only=True)
+                  for hz in (30, 60, 120, 240, 480)}
         span = max(ladder.values()) - min(ladder.values())
         self.assertEqual(sorted(ladder), [30, 60, 120, 240, 480])
         self.assertAlmostEqual(ladder[30], 81.5993, delta=1e-3)
@@ -292,51 +313,81 @@ class ExampleLevelDataTest(unittest.TestCase):
         self.assertGreater(span, 0.2, "梯子全距超过 0.2 ⇒ 容差 0.2 不可用")
         self.assertLess(span, 0.3, "梯子全距仍在 0.3 之内 ⇒ 容差 0.3 够用")
 
-    def stop_x_at_timestep(self, dt):
-        """示例关卡按文档策略走一遍,用给定的 dt(``simulate`` 固定 1/60)。"""
-        model = self.model
-        x = model.starts[self.level["spawn"]["segmentId"]] + self.level["spawn"].get("at", 0.0)
-        v = self.level["spawn"].get("speed", 0.0)
-        elapsed = 0.0
-        while elapsed < 120.0:
-            segment = model.segment_at(x)
-            if segment is None:
-                return x
-            mu = model.surfaces[segment["surface"]]["mu"]
-            thrust = model.accel if segment["id"] == "runway" else 0.0
-            dv, ds = model.advance(v, thrust - mu * model.gravity, dt)
-            v += dv
-            x += ds
-            elapsed += dt
-            if v <= model.rest_threshold and segment["id"] != "runway":
-                break
-        return x
-
     def test_over_cap_step_never_moves_backwards(self):
-        """``v > maxSpeed`` 是合法输入,越限步的位移必须非负(§2.4 的越限守卫)。
+        """``v > maxSpeed`` 是合法输入,越限步的位移必须非负(§2.4 的越限拦截)。
 
         ``spawn.speed`` 在 schema 里只有 ``minimum: 0``、没有最大值,``maxSpeed``
         又是逐关可覆盖的,所以 ``v`` 已经高于限速是**可达状态**,不是防御性假设。
-        未加守卫时 ``t_cap = (maxSpeed - v)/a`` 为负,两段式退化成
+        未加拦截时 ``t_cap = (maxSpeed - v)/a`` 为负,两段式退化成
         ``ds = maxSpeed*dt - (v-maxSpeed)²/(2a)``,越过 ``√(2·a·maxSpeed·dt)``
         (本关 1.954 m/s)后位移变负 —— 角色第一帧倒退,随后跑出赛道起点被判失败。
 
-        本测试直接探 ``advance``:``simulate``/``coast_distance`` 两个调用点都从
-        ``v <= maxSpeed`` 起步,**永远走不到这条分支**,所以只能在这里测。
-        """
-        a = self.model.accel - self.level["surfaces"]["normal"]["mu"] * self.model.gravity
-        self.assertGreater(a, 0)
-        threshold = self.model.max_speed + (2 * a * self.model.max_speed * FIXED_DT) ** 0.5
+        **三种 ``a`` 都要探。** 只探推力中的 ``a > 0`` 会让"越限守卫带 ``a > 0``
+        合取词"这个缺陷全绿地通过:一旦合取词在,``a == 0``(冰面 ``mu = 0``,
+        schema 允许)与 ``a < 0``(任何滑行段)的越限状态就绕过守卫,直接落到
+        ``advance`` 末尾的通用返回,``ds`` 是 ``v*dt`` 而非 ``maxSpeed*dt`` ——
+        ``a == 0, v == 40`` 时 0.6667 m,3.33 倍于文档上界。``a = -2.455`` 取本关
+        普通地面滑行的减速度(``mu = 0.25``),是真实的第二种符号。
 
-        for v in (self.model.max_speed, 13.0, threshold, 14.1, 20.0, 40.0):
-            dv, ds = self.model.advance(v, a)
-            self.assertGreaterEqual(ds, 0.0, f"v={v} 的位移为负")
-            self.assertLessEqual(dv, 0.0, f"v={v} 越限时不得再加速")
-            # 越限步也只按限速推进:既不能倒退,也不能比 vmax*dt 走得更远
-            self.assertLessEqual(ds, self.model.max_speed * FIXED_DT + 1e-12, f"v={v}")
-        # 恰在限速上时与解析拆分一致(两分支在 v == maxSpeed 处必须重合)
-        self.assertAlmostEqual(self.model.advance(self.model.max_speed, a)[1],
-                               self.model.max_speed * FIXED_DT, places=12)
+        本测试直接探 ``advance``:本关 ``spawn.speed`` 为 0,``simulate``
+        ``/coast_distance`` 一般从 ``v <= maxSpeed`` 起步;但关卡数据给出
+        ``spawn.speed > maxSpeed`` 时它们走得到,端到端版本见
+        ``test_level_with_spawn_speed_over_the_cap_stays_on_the_track``。
+        """
+        thrust_a = self.model.accel - self.level["surfaces"]["normal"]["mu"] * self.model.gravity
+        coast_a = -self.level["surfaces"]["normal"]["mu"] * self.model.gravity
+        self.assertGreater(thrust_a, 0)
+        self.assertLess(coast_a, 0)
+
+        for a in (thrust_a, 0.0, coast_a):
+            cap = self.model.max_speed * FIXED_DT
+            # 只有 a > 0 才存在"本步内到达限速"的临界速度(也是两段式退化的临界点)。
+            # a <= 0 时它没有实根 —— 那正是需要"守卫独立于 a"的原因。
+            probes = [self.model.max_speed, 13.0, 14.1, 20.0, 40.0]
+            if a > 0:
+                probes.append(self.model.max_speed
+                              + (2 * a * self.model.max_speed * FIXED_DT) ** 0.5)
+            for v in probes:
+                dv, ds = self.model.advance(v, a)
+                self.assertGreaterEqual(ds, 0.0, f"a={a} v={v} 的位移为负")
+                self.assertLessEqual(dv, 0.0, f"a={a} v={v} 越限时不得再加速")
+                # 越限步也只按限速推进:既不能倒退,也不能比 vmax*dt 走得更远
+                self.assertLessEqual(ds, cap + 1e-12, f"a={a} v={v} 越限步超过 vmax*dt")
+            if a >= 0:
+                # 恰在限速上时与解析拆分一致(两分支在 v == maxSpeed 处必须重合)。
+                # a < 0 时不该重合:v == maxSpeed 并未越限,角色只是正常减速,
+                # 位移是 0.19966 而非 0.2 —— 把那条也算进来会误伤正确实现。
+                self.assertAlmostEqual(self.model.advance(self.model.max_speed, a)[1],
+                                       cap, places=12)
+
+    def test_zero_friction_surface_cannot_uncap_an_over_speed_spawn(self):
+        """``mu = 0`` 是 schema 合法值(``minimum: 0``),它让 ``a == 0`` 可达。
+
+        越限守卫一旦带 ``a > 0`` 合取词,``mu = 0`` 的冰面就把限速完全关掉:
+        ``spawn.speed = 40`` 时角色一路滑到赛道尽头 x = 89.328,而文档关卡在
+        81.406 停住 —— 7.9 m 的额外行程,整套测试当时没有一条看得见。这里把
+        schema 边界接到物理层上:``mu = 0`` 只该让**减速**消失,不该让**限速**
+        消失,所以越限的那一帧仍然只推进 ``maxSpeed*dt``。
+        """
+        level = json.loads(json.dumps(self.level))
+        level["surfaces"]["ice"] = dict(level["surfaces"]["ice"], mu=0.0)
+        model = ReferenceModel(level)
+        self.assertEqual(level["surfaces"]["ice"]["mu"], 0.0)
+
+        # 单帧:越限且在无摩擦段上,a == 0,位移必须仍被限速钳住。
+        dv, ds = model.advance(40.0, 0.0)
+        self.assertLessEqual(ds, model.max_speed * FIXED_DT + 1e-12, "无摩擦越限步超过 vmax*dt")
+        self.assertLess(dv, 0.0, "越限状态必须被拉回限速")
+
+        # 整关:无摩擦冰面不会停住角色(没有减速),所以它必然滑到赛道尽头 ——
+        # 这是关卡数据本身的性质,不是限速失效。断言的是"越限的初速没有把
+        # 第一帧的位移放大",而不是终点位置。
+        level["spawn"]["speed"] = 40.0
+        model = ReferenceModel(level)
+        result = model.simulate(level["spawn"], thrust_segments={"runway"})
+        self.assertNotEqual(result["status"], "left-track",
+                            "越限 + 无摩擦不得把角色推出赛道起点一侧")
+        self.assertGreaterEqual(result["x"], 0.0)
 
     def test_level_with_spawn_speed_over_the_cap_stays_on_the_track(self):
         """整关复现:``spawn.speed`` 越限 / ``maxSpeed`` 被调低时,不许倒退跑出赛道。
@@ -346,7 +397,11 @@ class ExampleLevelDataTest(unittest.TestCase):
         越限的初速很快被限速与冰面摩擦吃掉,所以 20 和 40 收敛到同一个终点;
         ``maxSpeed = 6`` 的那一关则因为限速更低而提前停在判定区之前 —— 那是
         正确的(关卡设计如此),不是"倒退跑出赛道"。
+
+        但**收敛值本身不区分实现**:任何"越限帧多跑几米、之后照样收在同一处"
+        的实现都满足它。真正有判别力的是第一帧的位移上界,所以两行都加断言。
         """
+        thrust_a = self.model.accel - self.level["surfaces"]["normal"]["mu"] * self.model.gravity
         for spawn_speed, cap, expected_x in (
             (20.0, None, 81.4060),
             (40.0, None, 81.4060),
@@ -364,6 +419,10 @@ class ExampleLevelDataTest(unittest.TestCase):
                                    msg=f"spawn.speed={spawn_speed} maxSpeed={cap}")
             self.assertGreaterEqual(result["x"], 0.0,
                                     f"spawn.speed={spawn_speed} maxSpeed={cap}")
+            # 判别式:越限的第一帧必须被限速钳住(§6.1 断言 13 对 v > maxSpeed 的承诺)。
+            dv0, ds0 = model.advance(spawn_speed, thrust_a)
+            self.assertLessEqual(ds0, model.max_speed * FIXED_DT + 1e-12,
+                                 f"spawn.speed={spawn_speed} 的首帧位移超过 vmax*dt")
 
     def test_ramp_to_max_speed_matches_the_documented_distance(self):
         """§2.10 / §3.5:0 → maxSpeed 在普通地面上需要 7.66 m(离散)。"""
