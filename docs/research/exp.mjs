@@ -12,8 +12,12 @@
  *
  * The one non-deterministic path is `world.step(dt, timeSinceLastCalled,
  * maxSubSteps)` in §1.5(a) — it consults `performance.now()`, which is exactly
- * the defect that section demonstrates. Its numbers are therefore reported but
- * not asserted on.
+ * the defect that section demonstrates. The wall-clock bail-out can only end
+ * the substep loop early, never extend it, so §1.5(a) asserts what the defect
+ * cannot move: position == substeps·dt·v0, and the library clock reading
+ * 3.000 s while the substep counter reads less. The raw substep counts are
+ * printed but not pinned to exact integers, because `performance.now()` is
+ * what decides them.
  *
  * WHY EVERY DISTANCE HERE IS QUOTED WITH ITS SEATING
  * --------------------------------------------------
@@ -155,7 +159,10 @@ function slideCoulomb(mu, v0) {
 rule('§1.5(a) the 3-argument world.step() starves substeps at low frame rates')
 {
   // Frictionless, so x reads out *simulated time* directly: x = substeps·dt·v0.
-  // That proportionality is the measurement, not an artefact.
+  // That proportionality is the measurement, not an artefact. The library's own
+  // counters (`world.stepnumber`, `world.time`) are returned alongside x so the
+  // three can be compared: stepnumber is the number of internalStep() calls the
+  // engine actually ran, and time is what the engine *reports* as elapsed.
   const run = (fps) => {
     const world = makeWorld()
     flatGround(world, 0)
@@ -164,45 +171,97 @@ rule('§1.5(a) the 3-argument world.step() starves substeps at low frame rates')
     world.addBody(body)
     for (let i = 0; i < SETTLE_STEPS; i++) world.step(DT)
     const x0 = body.position.x
+    const steps0 = world.stepnumber
+    const time0 = world.time // both are cumulative; the deltas are the reading
     body.velocity.set(V_MAX, 0, 0)
     if (fps === null) {
       for (let i = 0; i < 180; i++) world.step(DT)
     } else {
       for (let i = 0; i < 3 * fps; i++) world.step(DT, 1 / fps, 3)
     }
-    return body.position.x - x0
+    return {
+      d: body.position.x - x0,
+      steps: world.stepnumber - steps0, // substeps the engine really ran
+      time: world.time - time0, // what the engine reports as time elapsed
+    }
   }
   const ideal = 3 * V_MAX
   console.log(`  frictionless, v0=${V_MAX} m/s, 3 s of wall time, ideal ${ideal} m`)
-  console.log('  call form                       x (m)     simulated   of ideal')
+  console.log('  call form                        x (m)  stepnumber  Δworld.time  of ideal')
+  const rows = []
   const single = run(null)
+  rows.push({ label: 'world.step(1/60) × 180', r: single, singleArg: true })
   console.log(
-    `  world.step(1/60) × 180          ${f(single, 3).padStart(7)}   ${f(single / V_MAX, 3)} s     ${f((100 * single) / ideal, 1)}%`,
+    `  world.step(1/60) × 180          ${f(single.d, 3).padStart(7)}  ${String(single.steps).padStart(10)}  ${f(single.time, 3).padStart(10)}  ${f((100 * single.d) / ideal, 1).padStart(6)}%`,
   )
   for (const fps of [60, 30, 10, 5]) {
-    const d = run(fps)
+    const r = run(fps)
+    rows.push({ label: `world.step(1/60, 1/${fps}, 3) × ${3 * fps}`, r, singleArg: false })
     console.log(
-      `  world.step(1/60, 1/${String(fps).padEnd(2)}, 3) × ${String(3 * fps).padEnd(4)} ${f(d, 3).padStart(7)}   ${f(d / V_MAX, 3)} s     ${f((100 * d) / ideal, 1)}%`,
+      `  world.step(1/60, 1/${String(fps).padEnd(2)}, 3) × ${String(3 * fps).padEnd(4)} ${f(r.d, 3).padStart(7)}  ${String(r.steps).padStart(10)}  ${f(r.time, 3).padStart(10)}  ${f((100 * r.d) / ideal, 1).padStart(6)}%`,
     )
   }
   console.log('  1-arg is exact and repeatable. The 3-arg form caps substeps at')
   console.log('  maxSubSteps per *call*, then discards the remainder with')
   console.log('  `accumulator %= dt`, so at 5 fps only a quarter of the time is')
   console.log('  simulated. It also consults performance.now() to bail out, which')
-  console.log('  makes the substep count machine-dependent — see DIST/12510-12549.')
-  check(Math.abs(single - ideal) < 1e-9, '§1.5(a): 1-arg step is not exact')
+  console.log('  makes the substep count machine-dependent — see DIST/12508-12551.')
+  console.log('  The last two columns are the point, and both are read off the')
+  console.log('  world object after the run (`world.stepnumber`, `world.time`), not')
+  console.log('  derived from x. `this.time += timeSinceLastCalled` is unconditional,')
+  console.log('  so Δworld.time is 3.000 s on every row, while the engine ran only')
+  console.log('  180/180/90/45/180 substeps. The clock a game loop would read is')
+  console.log('  therefore ahead of the simulation by the discarded substeps — that')
+  console.log('  is the defect, and it is measured here rather than inferred from x.')
+  check(Math.abs(single.d - ideal) < 1e-9, '§1.5(a): 1-arg step is not exact')
+  for (const { label, r, singleArg } of rows) {
+    // Discarded substeps are truncated, not invented: every substep is counted.
+    const implied = r.steps * DT * V_MAX
+    check(
+      Math.abs(r.d - implied) < 1e-6,
+      `§1.5(a) ${label}: x=${r.d.toFixed(4)} m but ${r.steps} substeps imply ${implied.toFixed(4)} m`,
+    )
+    // `this.time += timeSinceLastCalled` runs regardless of how many substeps
+    // were taken, so the reported clock advances 3.000 s on every row. The
+    // tolerance here is float noise only: this is the claim the card makes.
+    check(
+      Math.abs(r.time - 3) < 1e-9,
+      `§1.5(a) ${label}: Δworld.time=${r.time} is not 3.000 s`,
+    )
+    check(
+      r.steps <= 180 && r.steps > 0,
+      `§1.5(a) ${label}: stepnumber=${r.steps} outside [1, 180]`,
+    )
+    if (singleArg) {
+      check(r.steps === 180, `§1.5(a) 1-arg stepnumber ${r.steps} != 180`)
+    }
+  }
+  // The starvation itself, asserted at the two extremes rather than as exact
+  // integers: the wall-clock bail-out can only shorten a row, never lengthen it.
+  const at5 = rows.find((r) => r.label.includes('1/5,'))
+  check(
+    at5.r.steps <= 50,
+    `§1.5(a): 5 fps row ran ${at5.r.steps} substeps, not the starved ≤50`,
+  )
+  const at60 = rows.find((r) => r.label.includes('1/60,'))
+  check(at60.r.steps > at5.r.steps * 2, '§1.5(a): 60 fps row did not outrun the 5 fps row')
 }
 
 // ------------------------------------------------------------------ §1.5(b)
 rule('§1.5(b) effective friction is the PRODUCT, and the character material is mandatory')
 {
   console.log('  ground μ   character μ   μ_eff measured   μ_g·μ_c')
+  // expected = μ_g·μ_c, except where the product is 0: `if (friction > 0)` in
+  // createFrictionEquationsFromContact then creates NO friction equation at all,
+  // so μ_eff is not 0 but "nothing was measured" — `null`, printed `n/a`. That
+  // case is carried as an explicit expectation rather than short-circuited away.
   for (const [gm, cm] of [
     [ICE, CHAR],
     [RUBBER, CHAR],
     [ICE, 0.3],
     [RUBBER, 0.3],
     [ICE, 0.0],
+    [RUBBER, 0.0],
   ]) {
     const world = makeWorld()
     flatGround(world, gm)
@@ -211,12 +270,34 @@ rule('§1.5(b) effective friction is the PRODUCT, and the character material is 
     world.addBody(body)
     for (let i = 0; i < SETTLE_STEPS; i++) world.step(DT)
     const eff = muEff(world)
+    const expected = gm * cm === 0 ? null : gm * cm
     console.log(
       `  ${String(gm).padEnd(10)} ${String(cm).padEnd(13)} ${f(eff).padEnd(16)} ${f(gm * cm)}`,
     )
-    check(eff == null || Math.abs(eff - gm * cm) < 5e-4, `§1.5(b): μ_eff ${eff} != ${gm * cm}`)
+    if (expected === null) {
+      check(
+        eff === null,
+        `§1.5(b): μ_eff ${eff} with μ_g·μ_c = 0 — expected no friction equation (n/a)`,
+      )
+      console.log(
+        `  ${' '.repeat(10)}   ↑ product is 0, so \`if (friction > 0)\` is false and no`,
+      )
+      console.log(
+        `  ${' '.repeat(10)}     friction equation exists: the surfaces are frictionless.`,
+      )
+    } else {
+      check(
+        eff !== null && Math.abs(eff - expected) < 5e-4,
+        `§1.5(b): μ_eff ${eff} != μ_g·μ_c = ${expected}`,
+      )
+    }
   }
   console.log('  -- character body with NO Material --')
+  // Every ground value gives the same 0.3000 — but each is measured in its own
+  // world, so the row is three measurements, not one repeated claim. Note the
+  // μ_g = 0 ground is included: with the character's material missing, the
+  // product rule never runs and the ground's own value is discarded, so even a
+  // zero-friction ground falls through to defaultContactMaterial.
   for (const gm of [ICE, RUBBER, 0.0]) {
     const world = makeWorld()
     flatGround(world, gm)
@@ -228,10 +309,13 @@ rule('§1.5(b) effective friction is the PRODUCT, and the character material is 
     console.log(
       `  ${String(gm).padEnd(10)} ${'(none)'.padEnd(13)} ${f(eff).padEnd(16)} defaultContactMaterial = 0.30`,
     )
-    check(eff == null || Math.abs(eff - 0.3) < 5e-4, `§1.5(b): fallthrough μ_eff ${eff} != 0.30`)
+    check(
+      eff !== null && Math.abs(eff - 0.3) < 5e-4,
+      `§1.5(b): fallthrough μ_eff ${eff} (ground μ=${gm}) != 0.30`,
+    )
   }
   console.log('  The `matA && matB && ...` guard in createFrictionEquationsFromContact')
-  console.log('  (DIST/10448-10475) falls through to cm.friction when EITHER body')
+  console.log('  (DIST/10440-10489) falls through to cm.friction when EITHER body')
   console.log('  lacks a Material, so the ground value is silently discarded.')
 }
 
@@ -303,7 +387,18 @@ rule('§1.5(d) the adapter-layer Coulomb model delivers both the ratio and d ∝
 {
   console.log('  contact friction OFF on both bodies; friction applied as an')
   console.log('  impulse of at most μ·g·dt opposing the tangential velocity.')
-  console.log('  μ       v0    d measured   analytic v0²/(2μg)   error     stop')
+  console.log('  μ       v0    d measured   analytic v0²/(2μg)   abs err   v0·dt/2   rel err    stop')
+  // The impulse is applied *before* each world.step, so each step's displacement
+  // uses the already-reduced velocity and the discrete sum loses exactly
+  // v0·dt/2 m — the half-step of velocity the first impulse removes but which
+  // the analytic integral keeps. The absolute error is therefore μ-independent
+  // and linear in v0; the *relative* error 100·μ·g·dt/v0 carries the μ ratio.
+  // That relative law is the absolute law divided by d_analytic = v0²/(2μg),
+  // so it inherits the same O(dt²) slack from the finite step count: at v0=2
+  // the block stops in ~13 steps and the sum departs from the integral by
+  // 3.1e-4 m, which is 0.14% of a 0.23 m rubber slide. Both residuals are
+  // therefore asserted in metres, where the two laws share one bound.
+  const worst = { abs: 0, rel: 0 }
   for (const [mu, label] of [
     [ICE, 'ice 0.05'],
     [RUBBER, 'rubber 0.90'],
@@ -311,11 +406,27 @@ rule('§1.5(d) the adapter-layer Coulomb model delivers both the ratio and d ∝
     for (const v0 of [2, 4, 8, V_MAX]) {
       const r = slideCoulomb(mu, v0)
       const analytic = (v0 * v0) / (2 * mu * G)
+      const absErr = Math.abs(r.d - analytic)
+      const halfStep = (v0 * DT) / 2
+      const relErr = (100 * (r.d - analytic)) / analytic
       console.log(
-        `  ${label.padEnd(11)} ${String(v0).padStart(2)}  ${f(r.d, 3).padStart(9)} m   ${f(analytic, 3).padStart(9)} m      ${f((100 * (r.d - analytic)) / analytic, 2).padStart(6)}%  ${f(r.stop, 2)} s`,
+        `  ${label.padEnd(11)} ${String(v0).padStart(2)}  ${f(r.d, 3).padStart(9)} m   ${f(analytic, 3).padStart(9)} m   ${f(absErr, 4).padStart(7)}   ${f(halfStep, 4).padStart(7)}   ${f(relErr, 2).padStart(6)}%  ${f(r.stop, 2)} s`,
       )
+      worst.abs = Math.max(worst.abs, Math.abs(absErr - halfStep))
+      // both are negative (under-travel), so compare signed values; scale the
+      // relative law back to metres so it shares the one bound above
+      worst.rel = Math.max(worst.rel, (Math.abs(relErr + (100 * mu * G * DT) / v0) * analytic) / 100)
     }
   }
+  console.log(`  |d_meas − d_analytic| tracks v0·dt/2 to ${worst.abs.toExponential(1)} m across both`)
+  console.log('  media: the discretisation error is μ-independent and linear in v0.')
+  console.log(`  The *relative* error 100·μ·g·dt/v0 reproduces to ${worst.rel.toExponential(1)} m`)
+  console.log('  of slide distance — i.e. the μ ratio (18×) lives in that column only.')
+  check(worst.abs < 1e-3, `§1.5(d): |abs err − v0·dt/2| reached ${worst.abs}`)
+  check(
+    worst.rel < 1e-3,
+    `§1.5(d): rel err does not track 100·μ·g·dt/v0 (off by ${worst.rel.toExponential(1)} m)`,
+  )
   const ice2 = slideCoulomb(ICE, 2).d
   const ice4 = slideCoulomb(ICE, 4).d
   const rub2 = slideCoulomb(RUBBER, 2).d
@@ -332,8 +443,22 @@ rule('§1.5(d) the adapter-layer Coulomb model delivers both the ratio and d ∝
   console.log(`  Box(30,0.5,30) is NOT big enough; use an infinite Plane, or Box(400,0.5,400).`)
   // The design's acceptance line.
   check(i5 / r5 >= 3.0, `§1.5(d): adapter contrast ${(i5 / r5).toFixed(2)}× is below the 3× line`)
-  check(doubleIce >= 3.6 && doubleIce <= 4.4, `§1.5(d): doubling ratio ${doubleIce.toFixed(3)} leaves [3.6, 4.4]`)
+  check(doubleIce >= 3.6 && doubleIce <= 4.4, `§1.5(d): ice doubling ratio ${doubleIce.toFixed(3)} leaves [3.6, 4.4]`)
+  // The rubber row is the one with the large discretisation deviation (-7.23%
+  // at v0=2), so it is the row most likely to drift. Guard it too.
+  check(doubleRub >= 3.6 && doubleRub <= 4.4, `§1.5(d): rubber doubling ratio ${doubleRub.toFixed(3)} leaves [3.6, 4.4]`)
   check(i12 <= 400, `§1.5(d): d_ice(${V_MAX}) = ${i12.toFixed(1)} m exceeds the recommended ground`)
+  // Every check above is a *law* — a doubling ratio, a contrast, a bound on
+  // the ground — and all of them are invariant under a rescaled μ. That makes
+  // them blind to a wrong constant: this harness exits 0 with `const ICE = 0.07`
+  // (verified by mutation), which would silently invalidate every distance the
+  // card publishes. These two pin the card's own §1.5(d) cells as literal
+  // expectations, so a constant or integrator change that moves a published
+  // distance is caught here instead of only in the card's prose.
+  // Tolerance is 1 mm: the card prints these to millimetres.
+  check(Math.abs(i12 - 146.54) < 1e-3, `§1.5(d): d_ice(${V_MAX}) = ${i12.toFixed(4)} m != card's 146.540 m`)
+  check(Math.abs(r12 - 8.047) < 1e-3, `§1.5(d): d_rubber(${V_MAX}) = ${r12.toFixed(4)} m != card's 8.047 m`)
+  check(Math.abs(i5 / r5 - 18.52) < 0.01, `§1.5(d): adapter contrast ${(i5 / r5).toFixed(4)}× != card's 18.52×`)
 }
 
 // ------------------------------------------------------------------ §1.5(e)
@@ -419,13 +544,40 @@ rule(`§3.4 cap: shipping character at v0=${V_MAX} m/s, ${MEASURE_STEPS} steps`)
     }
     return { d: body.position.x - x0, airborne }
   }
+  // These are the only measurements of the SHIPPING configuration — character
+  // body at v0 = V_MAX with free rotation, i.e. the setup the game will use —
+  // so they are asserted, not merely printed. What must hold: the raw contact
+  // friction does NOT reach the 3× acceptance line on the configuration that
+  // ships, and the free-rotation body does not stay glued to the ground.
   for (const fixedRotation of [true, false]) {
     const ice = launch(ICE, fixedRotation)
     const rub = launch(RUBBER, fixedRotation)
+    const ratio = ice.d / rub.d
     console.log(
       `  raw contact friction, fixedRotation=${String(fixedRotation).padEnd(5)}  ice d=${f(ice.d, 4)} (air ${String(ice.airborne).padStart(3)})   ` +
-        `rubber d=${f(rub.d, 4)} (air ${String(rub.airborne).padStart(3)})   ratio=${f(ice.d / rub.d, 2)}`,
+        `rubber d=${f(rub.d, 4)} (air ${String(rub.airborne).padStart(3)})   ratio=${f(ratio, 2)}`,
     )
+    if (fixedRotation) {
+      // Pinned rotation: the ratio looks fine, which is exactly why the card
+      // must not quote it as the shipping number. Both distances stay tiny.
+      check(ratio >= 3.0, `§3.4 cap: fixed-rotation ratio ${ratio.toFixed(2)}× below the 3× line`)
+      check(
+        ice.d < 1 && rub.d < 1,
+        `§3.4 cap: fixed-rotation distances ${ice.d.toFixed(4)} / ${rub.d.toFixed(4)} m left [0, 1)`,
+      )
+    } else {
+      // Free rotation is what ships. Here the contrast collapses below the
+      // acceptance line — the finding the adapter layer exists to fix — and the
+      // body leaves the ground, so the "ratio" is not a sliding ratio at all.
+      check(
+        ratio < 3.0,
+        `§3.4 cap: free-rotation ratio ${ratio.toFixed(2)}× no longer shows the collapse`,
+      )
+      check(
+        ice.airborne > 0 && rub.airborne > 0,
+        `§3.4 cap: free-rotation body stayed on the ground (air ${ice.airborne}/${rub.airborne}); the collapse is no longer demonstrated`,
+      )
+    }
   }
   console.log('  Under the adapter model the same cap gives the §1.5(d) numbers.')
 }

@@ -30,6 +30,8 @@ What is covered:
 """
 
 import re
+import shutil
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -96,8 +98,14 @@ def _section(text, heading, stop=r"^#{2,3} "):
     return text[start:end]
 
 
-def _row(text, pattern):
-    """Return the single table row matching ``pattern``, or fail readably."""
+def _rows(text, pattern):
+    """Return *every* table row matching ``pattern``, or fail readably.
+
+    Named ``_rows`` (not ``_row``) because it returns a list: §1.5(d) has one
+    row per medium and several callers iterate both. Callers that expect a
+    single row assert ``len(...) == 1`` at the call site rather than relying on
+    an undocumented guarantee here.
+    """
     rows = [
         line
         for line in text.splitlines()
@@ -106,6 +114,23 @@ def _row(text, pattern):
     if not rows:
         raise AssertionError(f"no table row matching {pattern!r}")
     return rows
+
+
+def _row(text, pattern):
+    """Return the single table row matching ``pattern``.
+
+    A thin wrapper over :func:`_rows` for the rows that are genuinely unique:
+    it fails if the pattern is ambiguous instead of silently returning the
+    first of several, so an over-broad pattern is reported as a failure here
+    rather than as a confusing downstream assertion.
+    """
+    rows = _rows(text, pattern)
+    if len(rows) != 1:
+        raise AssertionError(
+            f"expected exactly one row matching {pattern!r}, found {len(rows)}: "
+            + "; ".join(r[:40] for r in rows)
+        )
+    return rows[0]
 
 
 def _cells(row):
@@ -143,9 +168,7 @@ class ResearchCardTest(unittest.TestCase):
 
     def test_render_library_sizes_are_pinned_in_their_own_row(self):
         section = _section(self.text, "### 1.2 ")
-        rows = _row(section, r"\|\s*最小可玩场景体积")
-        self.assertEqual(len(rows), 1, "expected exactly one size row in §1.2")
-        cells = _cells(rows[0])
+        cells = _cells(_row(section, r"\|\s*最小可玩场景体积"))
         self.assertIn("154 KB gzip", cells[1], "Three.js bundle size row changed")
         self.assertIn("380 KB gzip", cells[2], "Babylon.js bundle size row changed")
         self.assertIn(
@@ -192,10 +215,10 @@ class ResearchCardTest(unittest.TestCase):
             self.assertIn("可迁移", body)
 
     def test_stated_friction_parameters_reproduce_the_claimed_ratio(self):
-        rubber_rows = _row(self.text, r"\|\s*`?μ_橡胶`?\s*\|")
-        ice_rows = _row(self.text, r"\|\s*`?μ_冰面`?\s*\|")
-        rubber = float(_cells(rubber_rows[0])[1])
-        ice = float(_cells(ice_rows[0])[1])
+        rubber_row = _row(self.text, r"\|\s*`?μ_橡胶`?\s*\|")
+        ice_row = _row(self.text, r"\|\s*`?μ_冰面`?\s*\|")
+        rubber = float(_cells(rubber_row)[1])
+        ice = float(_cells(ice_row)[1])
         ratio = rubber / ice
         self.assertGreaterEqual(
             ratio, MIN_CONTRAST, "stated μ ratio violates the >=3x requirement"
@@ -203,7 +226,7 @@ class ResearchCardTest(unittest.TestCase):
         # the §3.4 row must state the *derived* ratio, not just the two inputs:
         # an unanchored search for "18" would also hit the 2026-10-15 date
         self.assertRegex(
-            ice_rows[0],
+            ice_row,
             r"0\.90\s*/\s*0\.05\s*=\s*18",
             "the §3.4 冰面 row must show the μ_rubber/μ_ice division explicitly",
         )
@@ -240,7 +263,7 @@ class ResearchCardTest(unittest.TestCase):
         The row layout is pinned, so moving the column or swapping in a
         hard-coded "4" fails here rather than silently retuning the answer key.
         """
-        rows = _row(self.text, r"\|\s*(?:冰面|橡胶)")
+        rows = _rows(self.text, r"\|\s*(?:冰面|橡胶)")
         self.assertGreaterEqual(len(rows), 2, "§1.5(d) needs both media rows")
         measured = {}
         for row in rows:
@@ -278,7 +301,7 @@ class ResearchCardTest(unittest.TestCase):
         in the row. A column copied from the neighbouring row — the defect this
         guards — reproduces the ratio column but not this one.
         """
-        rows = _row(self.text, r"\|\s*(?:冰面|橡胶)")
+        rows = _rows(self.text, r"\|\s*(?:冰面|橡胶)")
         self.assertGreaterEqual(len(rows), 2, "§1.5(d) needs both media rows")
         seen = {}
         for row in rows:
@@ -320,8 +343,7 @@ class ResearchCardTest(unittest.TestCase):
         )
 
     def test_determinism_row_pins_single_argument_step(self):
-        rows = _row(self.text, r"\|\s*物理步进\s*\|")
-        cells = _cells(rows[0])
+        cells = _cells(_row(self.text, r"\|\s*物理步进\s*\|"))
         self.assertIn(
             "world.step(1/60)",
             cells[1],
@@ -340,8 +362,7 @@ class ResearchCardTest(unittest.TestCase):
     def test_friction_combine_rule_and_character_material_are_documented(self):
         self.assertIn("乘积", self.text)
         self.assertIn("createFrictionEquationsFromContact", self.text)
-        rows = _row(self.text, r"\|\s*角色材质\s*`friction`\s*\|")
-        cells = _cells(rows[0])
+        cells = _cells(_row(self.text, r"\|\s*角色材质\s*`friction`\s*\|"))
         self.assertRegex(
             cells[1],
             r"\*\*1\.00\*\*",
@@ -349,19 +370,17 @@ class ResearchCardTest(unittest.TestCase):
         )
 
     def test_adapter_layer_and_ramp_release_are_pinned(self):
-        rows = _row(self.text, r"\|\s*接触摩擦\s*`Material\.friction`\s*\|")
-        self.assertIn("0", _cells(rows[0])[1], "contact friction must be pinned off")
-        impulse = _row(self.text, r"\|\s*适配层摩擦冲量上限\s*\|")
-        cells = _cells(impulse[0])
+        cells = _cells(_row(self.text, r"\|\s*接触摩擦\s*`Material\.friction`\s*\|"))
+        self.assertIn("0", cells[1], "contact friction must be pinned off")
+        cells = _cells(_row(self.text, r"\|\s*适配层摩擦冲量上限\s*\|"))
         self.assertIn("cosθ", cells[1], "the impulse cap must carry the cosθ factor")
         self.assertIn("dt", cells[1], "the impulse cap must be per-step")
         # the ramp story is stated with the textbook threshold, not a hand-tuned
         # angle table
         self.assertIn("tanθ ≤ μ", self.text)
         self.assertIn("atan(", self.text)
-        ground = _row(self.text, r"\|\s*地面长度")
         self.assertRegex(
-            _cells(ground[0])[1],
+            _cells(_row(self.text, r"\|\s*地面长度"))[1],
             r"≥\s*160\s*m",
             "the ground must be longer than d_ice(12 m/s) = 146.5 m",
         )
@@ -379,7 +398,7 @@ class ResearchCardTest(unittest.TestCase):
     def test_no_dangling_level_reference_or_unsound_inertia_wording(self):
         self.assertNotIn("关卡 7", self.text)
         self.assertNotIn("关卡7", self.text)
-        level_three = _row(self.text, r"\|\s*3\s*\|")
+        level_three = _rows(self.text, r"\|\s*3\s*\|")
         for row in level_three:
             self.assertNotIn(
                 "惯性大小与速度有关",
@@ -403,6 +422,97 @@ class ResearchCardTest(unittest.TestCase):
         for pinned in PINNED_VERSIONS:
             self.assertIn(pinned, self.text)
         self.assertIn("2026-10-15", self.text)
+
+    def test_deviation_law_is_stated_as_a_discrete_under_travel(self):
+        """§1.5(d)'s deviation must be explained with the right sign and law.
+
+        Two review findings meet here. The first: the prose used to say the
+        stopping Coulomb impulse *overshoots*, which predicts a positive
+        deviation, while all eight printed deviations are negative. The second:
+        the 1/v decay of the *relative* column was read as proof the model is
+        right "because the numerator is fixed" — but the numerator
+        ``|d_measured − d_analytic|`` is not fixed, it is ``v0 * dt / 2``,
+        which is linear in v0 and independent of mu.
+
+        Pinning the law here means a future edit cannot quietly restore either
+        claim: the wrong sign fails on the mechanism words, the wrong law fails
+        on ``v0·dt/2``.
+        """
+        block = _section(self.text, "#### (d)")
+        self.assertIn("走少了", block, "§1.5(d) must state the sign of the deviation")
+        self.assertIn(
+            "不可能超调",
+            block,
+            "§1.5(d) must rule the overshoot out explicitly, since all eight "
+            "printed deviations are negative",
+        )
+        self.assertNotIn(
+            "必然超调",
+            block,
+            "§1.5(d) must not restore the claim that the stopping impulse "
+            "necessarily overshoots: it predicts the opposite sign",
+        )
+        self.assertIn("v₀·dt/2", block, "§1.5(d) must state the discrete-step law")
+        # and the law is the *absolute* one, independent of mu, so the card must
+        # not claim the absolute error scales with the friction coefficient
+        self.assertRegex(
+            block,
+            r"与\s*μ\s*无关|μ\s*无关",
+            "§1.5(d) must say the absolute deviation is independent of μ",
+        )
+
+    def test_harness_runs_clean_when_node_and_deps_are_available(self):
+        """Actually execute the harness, rather than grepping its source.
+
+        ``test_harness_is_committed_and_referenced`` only checks that the
+        harness *text* contains ``--assert`` and the pinned constants, so the
+        harness could be numerically wrong — or unrunnable — and the suite
+        would stay green. This test closes that hole where it can be closed
+        without touching CI: ``.github/workflows/`` is deliberately left alone
+        (issue #5 forbids editing it) and has no Node step, so this test
+        *skips* when Node or ``cannon-es`` is unavailable instead of failing.
+        On any machine with Node and the dependency present it is a real gate
+        that runs the physics and asserts the exit status.
+
+        Runtime is ~1.3 s, so no slow-test marker is warranted.
+        """
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not installed; harness execution is skipped")
+        # Resolve cannon-es from wherever the harness would resolve it. The
+        # repo deliberately does not vendor node_modules, so a missing
+        # dependency is a skip, never a failure.
+        probe = subprocess.run(
+            [node, "--input-type=module", "-e", "await import('cannon-es')"],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if probe.returncode != 0:
+            self.skipTest(
+                "cannon-es is not resolvable from the repository; "
+                "run `npm install cannon-es@0.20.0` to enable this gate"
+            )
+        run = subprocess.run(
+            [node, str(HARNESS.relative_to(REPO_ROOT)), "--assert"],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+        self.assertEqual(
+            run.returncode,
+            0,
+            "docs/research/exp.mjs --assert failed:\n"
+            + run.stdout[-4000:]
+            + run.stderr[-2000:],
+        )
+        self.assertIn(
+            "OK: all measurements within tolerance",
+            run.stdout,
+            "the harness must print its all-clear line on success",
+        )
 
 
 if __name__ == "__main__":
